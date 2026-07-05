@@ -1,0 +1,29 @@
+# Tenant = configuration, never code. Adding tenant #2 means adding a file
+# like this + DB rows, and ingesting their docs into their own Chroma collection.
+
+slug: kesari-pipes
+display_name: Kesari Pipes
+tier: basic                      # basic | pro | premium — gates cloud models & premium tools
+business_desc: >
+  Wholesale pipe fitting supplier. Customers ask about product availability,
+  prices, bulk orders, delivery timelines, and payment follow-ups.
+
+branding:
+  greeting: "Namaste! Kesari Pipes assistant here. How can I help with your order today?"
+  tone: "professional, warm, Hindi-English mix acceptable"
+
+knowledge:
+  chroma_collection: kb_kesari_pipes
+  source_docs: ./data/kesari/      # SOPs, catalog, price list -> ingested per tenant
+  embedding: local_minilm          # dev default; prod may switch per tier
+
+channel:
+  adapter: telegram                # dev/free default; switchbox can flip to whatsapp
+  # adapter: whatsapp              # premium tier, enabled via tenant_tools table
+
+agent:
+  graph: standard_business_v1      # which LangGraph definition to load
+  hitl_gates:                      # actions that ALWAYS pause for human approval
+    - payment_confirmation
+    - order_above_threshold
+  order_threshold_inr: 50000
