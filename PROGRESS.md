@@ -10,3 +10,10 @@
 - Gateway deps installed in jarvis-core env (fastapi, uvicorn, supabase) — cryptography fixed via conda, same as MCP lab
 - Backlog: data-cleaning ingest crew (dedup), rapport agent (4 scores), lab GPU switch → AI Kosh later, Azure blob switch, ngrok wiring
 - NEXT: write main.py — the FastAPI gateway, first endpoint /health, then Telegram webhook
+
+## 2026-07-06 (12am-2am session)
+- main.py created: FastAPI gateway with /health endpoint
+- VERIFIED: gateway connects to Supabase Mumbai, returns live tenant data
+- Overwatch SRE agent backlogged: reporter first, runbook-based fixes only (no raw code exec), HITL gate on destructive actions
+- Docker-per-tenant deferred until multiple paying tenants
+- NEXT: Telegram webhook endpoint in main.py + ngrok tunnel so Telegram can reach the laptop
