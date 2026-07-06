@@ -11,9 +11,18 @@
 - Backlog: data-cleaning ingest crew (dedup), rapport agent (4 scores), lab GPU switch → AI Kosh later, Azure blob switch, ngrok wiring
 - NEXT: write main.py — the FastAPI gateway, first endpoint /health, then Telegram webhook
 
-## 2026-07-06 (12am-2am session)
+## 2026-07-06 — Session 1 (12:00 AM – ~1:00 AM)
 - main.py created: FastAPI gateway with /health endpoint
 - VERIFIED: gateway connects to Supabase Mumbai, returns live tenant data
 - Overwatch SRE agent backlogged: reporter first, runbook-based fixes only (no raw code exec), HITL gate on destructive actions
 - Docker-per-tenant deferred until multiple paying tenants
 - NEXT: Telegram webhook endpoint in main.py + ngrok tunnel so Telegram can reach the laptop
+
+## 2026-07-06 — Session 2 (10:15 AM – ongoing)
+- Telegram bot created: @Keshri_Pipes_Bot, token in .env
+- ngrok installed (Intel binary via curl), authtoken registered
+- VS Code set up as project kitchen (interpreter = jarvis-core, auto-activating terminals)
+- Telegram webhook LIVE: phone -> Telegram servers -> ngrok -> gateway -> echo reply verified
+- ngrok free tier = new URL each restart -> re-run setWebhook (see COMMANDS.md)
+- Backlog: reserved/owned domain (api.keshripipes.in) at deployment
+- NEXT: identify tenant + user from update -> users table comes alive
