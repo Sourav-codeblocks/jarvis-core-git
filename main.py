@@ -20,6 +20,14 @@ supabase = create_client(
     os.environ["SUPABASE_SECRET_KEY"],
 )
 
+import chromadb
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+chroma = chromadb.PersistentClient(path="chroma_db")
+catalog = chroma.get_collection(
+    name="kb_keshri_pipes",
+    embedding_function=SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2"),
+)
 
 @app.get("/health")
 def health():
@@ -82,11 +90,18 @@ async def ask_llm(user_text: str, user_display_name: str) -> str:
     Phase 0: direct call with a minimal Keshri Pipes persona.
     Next: this becomes a call into llm_router.route() with task_type routing.
     """
+    # RAG: retrieve the 4 most relevant catalog entries for this question.
+    retrieved = catalog.query(query_texts=[user_text], n_results=4)
+    catalog_context = "\n".join(retrieved["documents"][0])
+
     system_prompt = (
         "You are the assistant for Keshri Pipes, a wholesale pipe fitting "
         "supplier. Be brief, warm, and professional. Hindi-English mix is "
-        "fine if the customer uses it. You help with products, orders, "
-        "prices, and delivery questions."
+        "fine if the customer uses it.\n\n"
+        "Answer ONLY using the catalog information below. If the answer is "
+        "not in the catalog, say you'll check with the team — never invent "
+        "products, prices, or stock.\n\n"
+        f"CATALOG:\n{catalog_context}"
     )
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
