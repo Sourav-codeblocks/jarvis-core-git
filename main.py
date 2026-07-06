@@ -101,7 +101,18 @@ async def ask_llm(user_text: str, user_display_name: str) -> str:
             },
         )
         resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        data = resp.json()
+        supabase.table("usage_events").insert({
+            "tenant_id": 1,                      # Phase 0: hardcoded, same seam as tenant_slug
+            "task_type": "agent_turn",
+            "model": "llama3.2:3b-instruct-q8_0",
+            "provider": "ollama_dslab",
+            "prompt_tokens": data.get("prompt_eval_count"),
+            "completion_tokens": data.get("eval_count"),
+            "cost_usd": 0,                       # local model = free
+            "latency_ms": int(data.get("total_duration", 0) / 1_000_000),
+        }).execute()
+        return data["message"]["content"]
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):

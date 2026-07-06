@@ -1,0 +1,16 @@
+product_id,name,category,size,material,price_inr_per_unit,unit,stock_status,min_order_qty
+KP001,PVC Pipe 4 inch,pipes,4 inch,PVC,450,per 6m length,in_stock,10
+KP002,PVC Pipe 2 inch,pipes,2 inch,PVC,220,per 6m length,in_stock,20
+KP003,PVC Pipe 6 inch,pipes,6 inch,PVC,780,per 6m length,in_stock,5
+KP004,CPVC Pipe 1 inch,pipes,1 inch,CPVC,180,per 3m length,in_stock,25
+KP005,CPVC Pipe 0.75 inch,pipes,0.75 inch,CPVC,140,per 3m length,low_stock,25
+KP006,GI Pipe 2 inch,pipes,2 inch,galvanized iron,950,per 6m length,in_stock,5
+KP007,PVC Elbow 4 inch,fittings,4 inch,PVC,35,per piece,in_stock,50
+KP008,PVC Tee 4 inch,fittings,4 inch,PVC,48,per piece,in_stock,50
+KP009,PVC Coupler 2 inch,fittings,2 inch,PVC,18,per piece,in_stock,100
+KP010,Ball Valve 1 inch,valves,1 inch,brass,320,per piece,in_stock,10
+KP011,Gate Valve 2 inch,valves,2 inch,cast iron,680,per piece,low_stock,5
+KP012,Solvent Cement 500ml,consumables,500ml,NA,190,per tin,in_stock,12
+KP013,Teflon Tape,consumables,12mm x 10m,PTFE,15,per roll,in_stock,100
+KP014,HDPE Pipe 3 inch,pipes,3 inch,HDPE,520,per coil 30m,out_of_stock,2
+KP015,PVC End Cap 4 inch,fittings,4 inch,PVC,22,per piece,in_stock,50

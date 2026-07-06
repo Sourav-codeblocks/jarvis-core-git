@@ -26,3 +26,7 @@
 - ngrok free tier = new URL each restart -> re-run setWebhook (see COMMANDS.md)
 - Backlog: reserved/owned domain (api.keshripipes.in) at deployment
 - NEXT: identify tenant + user from update -> users table comes alive
+
+- FIRST LLM REPLY LIVE: ask_llm() via tunnel to dslab llama3.2:3b, persona working
+- Known gap (by design): answers are ungrounded hallucination — RAG on kb_keshri_pipes is the fix
+- NEXT: sample Keshri catalog data -> ingest into Chroma -> ground the bot's answers
