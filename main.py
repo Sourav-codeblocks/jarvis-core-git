@@ -84,7 +84,20 @@ def get_or_create_user(tenant_slug: str, channel: str, channel_user_id: str,
     )
     return created.data[0], True  # newly registered
 
-async def ask_llm(user_text: str, user_display_name: str) -> str:
+
+def get_recent_history(user_id: int, limit: int = 8) -> list[dict]:
+    """Working memory: this user's last N messages, oldest first."""
+    rows = (
+        supabase.table("messages")
+        .select("role, text")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [{"role": r["role"], "content": r["text"]} for r in reversed(rows.data)]
+
+async def ask_llm(user_text: str, history: list[dict]) -> str:
     """First thought: one LLM call through the tunnel to dslab's Ollama.
 
     Phase 0: direct call with a minimal Keshri Pipes persona.
@@ -110,6 +123,7 @@ async def ask_llm(user_text: str, user_display_name: str) -> str:
                 "model": "llama3.2:3b-instruct-q8_0",
                 "messages": [
                     {"role": "system", "content": system_prompt},
+                    *history,
                     {"role": "user", "content": user_text},
                 ],
                 "stream": False,
@@ -154,8 +168,18 @@ async def telegram_webhook(request: Request):
     print(f"USER: {user['display_name']} (id={user['id']}, "
           f"new={is_new}, reputation={user['reputation']})")
 
-  # First thought: route the message through the LLM, reply with its answer.
-    reply = await ask_llm(text, user["display_name"])
+    # First thought: route the message through the LLM, reply with its answer.
+    history = get_recent_history(user["id"])
+
+    supabase.table("messages").insert({
+        "tenant_id": 1, "user_id": user["id"], "role": "user", "text": text,
+    }).execute()
+
+    reply = await ask_llm(text, history)
+
+    supabase.table("messages").insert({
+        "tenant_id": 1, "user_id": user["id"], "role": "assistant", "text": reply,
+    }).execute()
 
     async with httpx.AsyncClient() as client:
         await client.post(

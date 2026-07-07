@@ -30,3 +30,9 @@
 - FIRST LLM REPLY LIVE: ask_llm() via tunnel to dslab llama3.2:3b, persona working
 - Known gap (by design): answers are ungrounded hallucination — RAG on kb_keshri_pipes is the fix
 - NEXT: sample Keshri catalog data -> ingest into Chroma -> ground the bot's answers
+
+- RAG GROUNDED: bot quotes KP001 @ Rs450 correctly, refuses to invent copper pipes
+- Before/after hallucination proof captured (screenshot) — demo gold for Jul 26
+- usage_events logging live from row 1 (tokens, latency, cost=0)
+- Ingest pipeline with content-hash dedup = seed of data-cleaning crew
+- NEXT: conversation memory (bot forgets everything between messages) OR broadcast machinery (festival greetings + payment follow-up share 70%)
