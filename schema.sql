@@ -25,6 +25,16 @@ CREATE TABLE users (
     UNIQUE (tenant_id, channel, channel_user_id)
 );
 
+CREATE TABLE messages (
+    id          BIGSERIAL PRIMARY KEY,
+    tenant_id   BIGINT NOT NULL REFERENCES tenants(id),
+    user_id     BIGINT NOT NULL REFERENCES users(id),
+    role        TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    text        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_messages_user ON messages (user_id, created_at DESC);
+
 -- THE SWITCHBOX. Founder dashboard is CRUD on this table.
 -- Agent client reads enabled rows at session start and mounts only those MCP tools.
 CREATE TABLE tenant_tools (
