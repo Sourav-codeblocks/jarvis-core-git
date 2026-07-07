@@ -1,5 +1,39 @@
 # Jarvis Core — Progress Log
 
+## Current Status Snapshot (as of 2026-07-07)
+
+**Completed:**
+- Jarvis Core Gateway (Phase 0): FastAPI app, Supabase Postgres, `/health`
+  endpoint, Telegram webhook live end-to-end (phone → Telegram → ngrok →
+  gateway → reply).
+- Toleration middleware, LLM router matrix, and RAG-grounded catalog answers
+  (kb_keshri_pipes) all working, with usage_events logging cost/latency.
+- Next.js frontend scaffolded via Lovable — initial web client for Jarvis exists.
+
+**In Progress:**
+- Designing the voice agent for the Lovable/Next.js frontend.
+- Deciding on WebSocket vs WebRTC transport between the frontend and the Jarvis
+  Core Gateway (moving off plain REST for this path, to support full-duplex
+  audio and "barge-in" interruptions).
+- Establishing the WebSocket connection itself between frontend and gateway.
+- Implementing Web Audio API capture on the frontend (mic → binary chunks).
+
+**Next Steps / Backlog:**
+- Integrate STT (e.g. Deepgram) and TTS (e.g. ElevenLabs) processing in the
+  gateway, sitting in front of / behind the existing LLM router.
+- Implement barge-in logic: gateway emits `stop_audio` when the user speaks
+  over playback; frontend clears its audio buffer immediately.
+- Define the shared JSON event schema (`status`, `audio`, `stop_audio`, etc.)
+  so Telegram and web/voice map onto the same internal function calls.
+- Sync conversation history/state between Telegram and the Web UI (same
+  tenant/user rows in Postgres, no channel-specific memory).
+- Session-token issuance so the browser never holds provider API keys directly.
+- Still open from Phase 0: `messages` table needs adding to `schema.sql`
+  (main.py already reads/writes it), and ingest.py's doc-ID dedup should key
+  off `product_id` rather than a content hash (see code_review.md).
+
+---
+
 ## 2026-07-05
 - Supabase project 'jarvis-core' created, region Mumbai (ap-south-1)
 - schema.sql executed successfully — all tables live, Kesari Pipes seeded as tenant 1
@@ -37,41 +71,15 @@
 - Ingest pipeline with content-hash dedup = seed of data-cleaning crew
 - NEXT: conversation memory (bot forgets everything between messages) OR broadcast machinery (festival greetings + payment follow-up share 70%)
 
-## 2026-07-07 — Session (morning)
-- Git repo initialized and pushed to GitHub: Sourav-codeblocks/jarvis-core-git (private)
-  - Added .gitignore (chroma_db/, __pycache__/, .DS_Store, .env) — none of these were
-    ever exposed; .env confirmed never tracked
-  - jarvis-core and JARVIS HUD (Lovable) are separate repos by design — HUD is a
-    frontend shell that will call this backend's API, not share a codebase
-- CONFIRMED: messages table exists live in Supabase (20 real records, bot working
-  fine) — schema.sql was just never synced. Fixed: added messages table definition
-  to schema.sql, pushed. No functional bug, was a documentation drift issue only.
-- FIXED + VERIFIED: ingest.py dedup bug — doc_id was content-hash-based, so any
-  price/stock change created a duplicate vector instead of overwriting. Changed to
-  doc_id = product_id. Verified via full chroma_db wipe + re-ingest: 15 products in
-  CSV -> 15 documents in collection (previously was showing 30, i.e. stale dupes
-  from the old hash scheme). Committed + pushed.
-- FIXED + VERIFIED: llm_router.py KeyError — providers[provider_name] lookup was
-  outside the try block, so a missing provider key crashed the whole router instead
-  of falling through the chain. Moved lookup inside try. Verified with a throwaway
-  test script simulating a missing anthropic_api key: router now correctly raises
-  AllProvidersFailed instead of a raw KeyError. Committed + pushed.
-- Discussed: Lovable AI for a sci-fi voice-HUD frontend ("JARVIS") with mic + call
-  buttons, wired later to this backend's router (voice command -> intent -> Telegram
-  or n8n/email route). Free tier likely sufficient for v1 prototype. Login via
-  GitHub (not Gmail) for continuous export/self-hosting. Prompt for the visual
-  shell already written and used — Lovable connected to GitHub
-  (Sourav-codeblocks org), no repo linked yet (expected, HUD project not started).
-- STILL OPEN — RLS is disabled on all Supabase tables (flagged again, same as
-  2026-07-05 note). Not urgent with one tenant, but must fix before onboarding
-  tenant #2 or exposing beyond Kesari.
-- STILL OPEN from code_review.md, in priority order:
-  1. RLS enablement on Supabase tables
-  2. Hardcoded tenant seams in main.py (tenant_slug, tenant_id: 1, global Chroma
-     collection, single TELEGRAM_BOT_TOKEN)
-  3. toleration.py missing db interface (get_moderation_state, increment_offtopic,
-     set_hard_ignore not implemented anywhere)
-  4. kesari vs keshri spelling reconciliation across schema.sql seed / main.py
-     hardcoded values / live DB
-- NEXT: pick up RLS or main.py tenant-seam fixes next backend session. Separately,
-  start building the JARVIS HUD in Lovable (new chat thread).
+## 2026-07-07 — Frontend + Voice Agent Kickoff
+- Generated the Jarvis web frontend using Lovable + Next.js.
+- Scoped the voice agent integration: moving this path to WebSockets/WebRTC
+  instead of REST, so the frontend and gateway can hold a persistent,
+  full-duplex connection (mirrors why Telegram feels fluid — webhook/stream,
+  not poll-per-message).
+- Sketched the event schema direction: `status` events (thinking/speaking) for
+  UI indicators, `audio` events for TTS playback, `stop_audio` for barge-in.
+- Decision: Telegram and the web/voice frontend will read/write the same
+  `users`/`messages` rows so a customer's context carries across channels.
+- NEXT: stand up the WebSocket route on the gateway, wire Web Audio API mic
+  capture on the frontend, then bring in STT/TTS providers.
