@@ -1,0 +1,141 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-panel: var(--panel);
+  --color-panel-border: var(--panel-border);
+  --color-cyan: var(--jv-cyan);
+  --color-cyan-dim: var(--jv-cyan-dim);
+  --color-green: var(--jv-green);
+  --color-amber: var(--jv-amber);
+  --color-red: var(--jv-red);
+  --color-muted-foreground: var(--muted-foreground);
+  --font-display: "Orbitron", "Space Grotesk", sans-serif;
+  --font-sans: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  --background: #050508;
+  --foreground: oklch(0.97 0.01 220);
+  --panel: oklch(0.2 0.03 240 / 0.35);
+  --panel-border: oklch(0.85 0.05 220 / 0.15);
+  --muted-foreground: oklch(0.7 0.03 220 / 0.7);
+  /* Cassiopeia defaults (supernova remnant palette) */
+  --jv-cyan: #e8c07a;
+  --jv-cyan-dim: #6a4b8a;
+  --jv-cyan-alt: #7fb8d4;
+  --jv-cyan-alt2: #c07ab8;
+  --jv-hot: #fff5d6;
+  /* --jv-green is retired as green; now holds theme-contrast color */
+  --jv-green: #7fb8d4;
+  --jv-amber: #ffaa00;
+  --jv-red: #ff4455;
+}
+
+@layer base {
+  * {
+    border-color: color-mix(in oklab, var(--jv-cyan) 20%, transparent);
+  }
+  html, body, #root {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+  }
+  body {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+}
+
+/* ---------- Animations ---------- */
+@keyframes jv-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.03); opacity: 1; }
+}
+@keyframes jv-spin-slow { to { transform: rotate(360deg); } }
+@keyframes jv-spin-rev { to { transform: rotate(-360deg); } }
+@keyframes jv-scanline-drift {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 100vh; }
+}
+@keyframes jv-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+@keyframes jv-scan-in {
+  0% { clip-path: inset(0 100% 0 0); opacity: 0; }
+  40% { opacity: 1; }
+  100% { clip-path: inset(0 0 0 0); opacity: 1; }
+}
+@keyframes jv-fade-slide-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes jv-bar-rise {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes jv-arc-sweep {
+  from { stroke-dashoffset: var(--arc-len); }
+  to { stroke-dashoffset: var(--arc-target); }
+}
+@keyframes jv-comet {
+  from { stroke-dashoffset: var(--path-len); }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes jv-pulse-soft {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor, 0 0 24px -4px currentColor; }
+  50% { box-shadow: 0 0 0 8px transparent, 0 0 40px -2px currentColor; }
+}
+@keyframes jv-drift-particles {
+  0% { transform: translate(0,0); opacity: 0; }
+  10% { opacity: 0.6; }
+  90% { opacity: 0.4; }
+  100% { transform: translate(var(--dx), var(--dy)); opacity: 0; }
+}
+@keyframes jv-caret { 50% { opacity: 0; } }
+@keyframes jv-node-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50%      { opacity: 0.9;  transform: scale(1.25); }
+}
+@keyframes jv-edge-life {
+  0%   { opacity: 0; stroke-dasharray: 0 200; }
+  25%  { opacity: 0.75; stroke-dasharray: 200 0; }
+  75%  { opacity: 0.6;  stroke-dasharray: 200 0; }
+  100% { opacity: 0; stroke-dasharray: 200 0; }
+}
+
+@utility jv-panel {
+  background: linear-gradient(180deg, oklch(0.22 0.04 240 / 0.55), oklch(0.13 0.03 240 / 0.55));
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid color-mix(in oklab, var(--jv-cyan) 25%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--jv-cyan) 8%, transparent) inset,
+    0 20px 60px -20px color-mix(in oklab, var(--jv-cyan) 40%, transparent);
+}
+@utility jv-glow-cyan {
+  color: var(--jv-cyan);
+  text-shadow: 0 0 12px color-mix(in oklab, var(--jv-cyan) 60%, transparent);
+}
+@utility jv-glow-green {
+  color: var(--jv-green);
+  text-shadow: 0 0 12px color-mix(in oklab, var(--jv-green) 60%, transparent);
+}
+@utility jv-glow-amber {
+  color: var(--jv-amber);
+  text-shadow: 0 0 12px color-mix(in oklab, var(--jv-amber) 60%, transparent);
+}
+@utility jv-glow-red {
+  color: var(--jv-red);
+  text-shadow: 0 0 12px color-mix(in oklab, var(--jv-red) 60%, transparent);
+}
+@utility jv-tracking {
+  letter-spacing: 0.22em;
+}
