@@ -4,9 +4,10 @@ Reads a tenant's catalog CSV, turns each product row into a small text
 document, embeds it locally, and stores it in the tenant's own ChromaDB
 collection (kb_keshri_pipes — the One Rule applies to knowledge too).
 
-Dedup: each document's ID is a hash of its content. Re-running ingest on
-the same file changes nothing; changed rows update; new rows append.
-This is the seed of the future data-cleaning ingest crew.
+Dedup: each document's ID is the product_id itself. Re-running ingest on
+the same file changes nothing; changed rows (price/stock updates) overwrite
+the existing vector in place; new rows append. This is the seed of the
+future data-cleaning ingest crew.
 
 Usage:
     python ingest.py --csv data/keshri_catalog.csv --collection kb_keshri_pipes
@@ -14,7 +15,6 @@ Usage:
 
 import argparse
 import csv
-import hashlib
 from pathlib import Path
 
 import chromadb
@@ -56,8 +56,10 @@ def main() -> None:
     with csv_path.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             doc = row_to_document(row)
-            # Content-hash ID = automatic dedup. Same content -> same ID -> upsert no-op.
-            doc_id = f"{row['product_id']}_{hashlib.sha1(doc.encode()).hexdigest()[:10]}"
+            # product_id alone is the ID: same product always maps to the
+            # same vector, so upsert genuinely overwrites stale price/stock
+            # instead of appending a duplicate.
+            doc_id = row["product_id"]
             docs.append(doc)
             ids.append(doc_id)
             metadatas.append({
