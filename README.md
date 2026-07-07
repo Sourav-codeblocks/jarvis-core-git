@@ -140,12 +140,22 @@ voice path reuses this exact router for the "brain" step — only the I/O layer
   a mandatory HITL `interrupt()` gate — the exact pattern from the HITL lab.
 
 ## Phase Plan
-- **Phase 0 (done/near-done):** One tenant (Kesari Pipes), Telegram, local
-  Chroma RAG, Postgres schema, toleration middleware, usage logging. End-to-end
+- **Phase 0 (done):** One tenant (Kesari Pipes), Telegram, local Chroma
+  RAG, Postgres schema, toleration middleware, usage logging. End-to-end
   slice, working live.
-- **Phase 0.5 (current):** Next.js web frontend (via Lovable) + voice agent.
-  WebSocket/WebRTC bridge into the same gateway, STT/TTS integration,
-  barge-in logic, shared conversation state with Telegram.
+- **Phase 0.5 (done):** Founder's Core — a second, business-owner-facing
+  frontend with a real, working voice pipeline:
+  - Mic → Deepgram live STT → real tool-calling (qwen2.5:7b via Ollama)
+    → founder tool registry → spoken answer (Deepgram Aura-2 TTS) +
+    visual overlay (chart/gauge/table/report), all over WebSocket.
+  - Two-tier LLM routing: qwen2.5 (tools attached) decides if a founder
+    report answers the question; if not, llama3.1:8b (no tools) gives a
+    real conversational answer instead of forcing a bad tool match.
+  - Two tools wired to real data (`usage_events` via Supabase,
+    the product catalog via ChromaDB); four more still fixtures.
+  - Continuous "Call" mode with barge-in — Jarvis stops talking the
+    instant the founder starts speaking again.
+  - Full architecture reference: see `WORKING.md`.
 - **Phase 1:** Founder Dashboard (Streamlit) — reads `usage_events`, toggles
   `tenant_tools`. Role-based views (owner vs operator) per the earlier design.
 - **Phase 2:** Second tenant onboarded purely via config to prove isolation.
@@ -155,20 +165,32 @@ voice path reuses this exact router for the "brain" step — only the I/O layer
 
 ## Files
 - `schema.sql` — the multi-tenant foundation (run against Postgres/Supabase)
-- `main.py` — FastAPI gateway; Telegram webhook live, voice WebSocket route planned
-- `toleration.py` — strike system with reputation-based limits
+- `main.py` — FastAPI gateway; mounts the Telegram, founder chat, voice, and TTS routers
+- `founder_ws.py` — founder tool registry + two-tier LLM routing (qwen2.5 → llama3.1:8b)
+- `voice_bridge.py` — bridges browser mic audio to Deepgram live STT
+- `tts.py` — proxies text to Deepgram Aura-2 TTS
+- `toleration.py` — strike system with reputation-based limits (Telegram path only)
 - `llm_router.py` — model matrix + provider fallback chain
 - `ingest.py` — per-tenant catalog → ChromaDB ingest with dedup
 - `tenant.kesari.example.yaml` — tenant = config, never code
+- `WORKING.md` — full flow/architecture reference for the voice pipeline
+- `frontend/` — customer-facing HUD (Next.js, via Lovable)
+- `founders-core/` — business-owner HUD with voice, reports, and visual overlays
 
 ## What's needed next (build queue)
-1. WebSocket route on the gateway for the voice/web client (audio in, status +
-   audio events out).
-2. STT integration (chunked audio → text) feeding the existing LLM router.
-3. TTS integration (LLM text → streamed audio) with barge-in / `stop_audio`.
-4. Shared event schema doc so Telegram and web/voice both map onto the same
-   internal function calls (e.g. "book a meeting" behaves identically either way).
-5. Verify session token issuance so the browser never sees provider API keys.
-6. `standard_business_v1` LangGraph (analyse → act → HITL gate → respond).
-7. MCP server skeleton for the first tool + client-side mounting from `tenant_tools`.
-8. Postgres checkpointer wiring for LangGraph.
+1. Wire the remaining four founder tools (revenue, runway, pipeline,
+   briefing) to real Postgres/CRM data — currently fixtures.
+2. Conversation memory for the founder path — every query is stateless
+   right now (no `get_recent_history()` equivalent), so "what did I say
+   earlier" style questions can't work yet.
+3. `usage_events` logging for founder queries (Telegram logs every call;
+   the founder path doesn't yet).
+4. Tenant-dynamic resolution — `tenant_id` is hardcoded to 1 throughout
+   the founder/voice path, same seam as the Telegram webhook.
+5. Fix the Chroma collection name mismatch (`kb_keshri_pipes` vs.
+   `kb_kesari_pipes` in schema.sql) flagged in `code_review.md`.
+6. Consolidate `founder_ws.py`'s direct Ollama calls into `llm_router.py`'s
+   routing/fallback chain instead of a separate code path.
+7. `standard_business_v1` LangGraph (analyse → act → HITL gate → respond).
+8. MCP server skeleton for the first tool + client-side mounting from `tenant_tools`.
+9. Postgres checkpointer wiring for LangGraph.
