@@ -250,6 +250,10 @@ log.
 - **OpenRouter unverified** — key authenticates (429 not 401 on first
   try) but the free pool was saturated; smoke-test again before counting
   it as a real link in the chain.
+- **Chat-channel adapters still hand-rolled in Python** — Telegram's
+  webhook is custom FastAPI code with its own payload parsing. Plan is to
+  move this to n8n (see Phase Plan below) so adding WhatsApp/Slack/etc.
+  is node configuration, not new Python files.
 
 ## Files
 - `schema.sql` — the multi-tenant foundation (run against Postgres/Supabase)
@@ -261,7 +265,9 @@ log.
   wrappers per provider (ollama, gemini, groq, openrouter, anthropic)
 - `certify_model.py` — the certification gate's eval runner
   (green/yellow/red per model per task; safety miss = automatic red)
-- `db_client.py` — shared Supabase client factory
+- `db_client.py` — shared Supabase client factory + tenant resolution
+  (`resolve_tenant(slug)` — the single seam every channel now uses to
+  turn a tenant_slug into a real tenant_id, tier, and chroma_collection)
 - `schema_addition.sql` — `model_registry` + `eval_runs` DDL (already run
   against live Supabase 2026-07-13)
 - `founder_ws.py` — founder tool registry + LLM tool-calling brain (voice AND typed chat)
@@ -287,6 +293,16 @@ log.
   provider (separate session, not blocking the above); fix the catalog
   tool-calling bug; point remaining founder tools at real data; add auth
   to the voice/founder routes; wire a model_catalog tool into the founder
-  voice pipeline.
+  voice pipeline; migrate chat-channel adapters (Telegram now,
+  WhatsApp/Slack/other later) from custom Python webhook code to n8n —
+  Python keeps a single internal `POST /api/v1/chat`
+  (tenant_id, channel, channel_user_id, display_name, text -> reply_text),
+  n8n holds each channel's platform credentials itself and handles
+  inbound payload parsing + outbound send via its built-in nodes, so a
+  live secret never has to round-trip through Python on every message.
+  Does NOT apply to `founder_ws.py`/`voice_bridge.py` — those stay custom
+  Python; they're persistent WebSocket connections (full-duplex audio,
+  barge-in) that n8n's request/response model can't hold open.
+  `tenant_tools` stays the on/off switch per tenant/channel either way.
 - **Phase 2:** Second tenant onboarded purely via config to prove isolation.
 - **Phase 3:** B2C Life OS module — deferred deliberately, per original plan.
