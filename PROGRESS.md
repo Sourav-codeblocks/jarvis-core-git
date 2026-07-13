@@ -300,3 +300,18 @@ having been uploaded/tested against the real stack):**
 5. Add auth to `/ws/founder/*` and `/tts/*` before any wider exposure
 6. Revisit Jarvis Command Hub's Deepgram-timeout bug once Founder's Core is solid
 >>>>>>> 0a01ef885a09db033cc4ebce2b8e909e59bc8c95
+
+## 2026-07-13 — Cloud fallback onboarding + certification gate
+- Context: dslab GPU/Ollama not always reachable — onboarded free-tier cloud models as fallback
+- NEW: model_registry + eval_runs tables live in Supabase (schema_addition.sql) — the certification gate
+- NEW: certify_model.py (eval engine job #1) — intent accuracy, tool-call format, safety refusal probes, latency; verdicts green/yellow/red; safety failure = automatic red
+- NEW: providers.py (uniform call wrappers: ollama/gemini/groq/openrouter/anthropic), db_client.py (shared supabase factory)
+- UPDATED: llm_router.py — fallback chains now ollama → gemini → groq → openrouter → anthropic; router refuses to route to anything not green in model_registry
+- Gemini gotcha: gemini-2.5-flash retired for new accounts → use rolling aliases gemini-flash-latest / gemini-flash-lite-latest (never breaks on retirement)
+- CERTIFIED GREEN: gemini/flash-lite-latest for intent (100% accuracy, 1.3s), groq/llama-3.3-70b for agent_turn (tool calls OK, 336ms!)
+- RED (contested): gemini/flash-latest for agent_turn — verdict contaminated by 429s (flash daily quota ~20 req, separate from flash-lite pool); re-certify after quota reset
+- EVAL ENGINE BUG FOUND: can't distinguish "model failed" from "provider throttled" — both land red. Fix next session: treat 429 as INCONCLUSIVE + backoff retry
+- OpenRouter: key authenticates, free pool 429'd on first try — retry later
+- NOTE: messages table already EXISTS in live Supabase but is missing from schema.sql on disk — sync schema.sql to match reality (closes code_review.md item #1)
+- ⚠️ SECURITY: rotate GEMINI_API_KEY (full key appeared in pasted terminal logs) — delete in AI Studio, create new, update .env
+- NEXT: re-certify gemini flash for agent_turn after quota reset; add 429-aware retry to certify_model.py; sync messages table into schema.sql
