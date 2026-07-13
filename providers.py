@@ -140,3 +140,69 @@ def get_provider_call(provider: str, model: str):
     if provider not in _BUILDERS:
         raise ValueError(f"Unknown provider: {provider}")
     return _BUILDERS[provider](model)
+
+
+# ---------------------------------------------------------------------------
+# Raw message/tool-calling interface — separate from the flat-prompt contract
+# above on purpose. llm_router.route() and certify_model.py depend on the
+# call(prompt, timeout) -> (text, usage) shape and neither needs to change.
+# This exists for founder_ws.py's route_founder_query(), which needs actual
+# structured tool_calls back (which tool, what arguments), not just text —
+# something the flat interface has no way to carry.
+#
+#     raw_call(messages: list[dict], tools: list[dict] | None, timeout: int)
+#         -> raw provider JSON response (shape differs per provider —
+#            see founder_ws.py's _normalize_message for the adapter)
+#
+# Only groq and ollama_local are wired here: groq is the certified,
+# working tool-calling candidate (see PROGRESS.md 2026-07-13 — confirmed
+# tool-call format OK at 336ms); ollama_local is kept ready for when a
+# local GPU (dslab or a new rental) is reachable again, matching the same
+# "registered but not necessarily in the active chain" pattern main.py
+# already uses for CLOUD_PROVIDERS.
+# ---------------------------------------------------------------------------
+
+def _ollama_local_raw(model: str):
+    def call(messages: list, tools: list | None, timeout: int):
+        payload = {"model": model, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = tools
+        url = f"{os.environ.get('OLLAMA_URL', 'http://localhost:11434')}/api/chat"
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+    return call
+
+
+def _groq_raw(model: str):
+    def call(messages: list, tools: list | None, timeout: int):
+        payload = {"model": model, "messages": messages}
+        if tools:
+            payload["tools"] = tools
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    return call
+
+
+_RAW_BUILDERS = {
+    "ollama_local": _ollama_local_raw,
+    "groq": _groq_raw,
+}
+
+
+def get_raw_chat_call(provider: str, model: str):
+    """Returns call(messages, tools, timeout) -> raw provider JSON for
+    tool-calling-capable providers only. Raises for anything not in
+    _RAW_BUILDERS (e.g. gemini's function-calling schema is different
+    enough that it isn't wired here yet — see founder_ws.py's chain,
+    which only lists providers this function actually supports)."""
+    if provider not in _RAW_BUILDERS:
+        raise ValueError(f"No raw tool-calling interface for provider: {provider}")
+    return _RAW_BUILDERS[provider](model)

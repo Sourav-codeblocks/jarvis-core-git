@@ -78,11 +78,11 @@ export function speak(text: string): void {
 }
 
 // --- Real-time voice input bridge -------------------------------------------
-// Phase 0: kesari-pipes hardcoded — same seam as GATEWAY_WS_URL in
+// Phase 0: keshri-pipes hardcoded — same seam as GATEWAY_WS_URL in
 // dataAdapter.ts. Swap for a runtime tenant/session value once founder
 // login exists.
 
-const VOICE_WS_URL = `${GATEWAY_URL.replace(/^http/, "ws")}/ws/founder/kesari-pipes/voice`;
+const VOICE_WS_URL = `${GATEWAY_URL.replace(/^http/, "ws")}/ws/founder/keshri-pipes/voice`;
 
 export interface VoiceSessionHandlers {
   /** Live transcript as Deepgram hears it — wire this to a caption/preview later. */

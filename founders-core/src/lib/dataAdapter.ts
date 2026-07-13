@@ -119,12 +119,12 @@ export function getReportById(id: string): FounderReport | undefined {
 }
 
 // --- Real gateway bridge ----------------------------------------------------
-// Phase 0: kesari-pipes is the only tenant, so the slug is hardcoded here —
+// Phase 0: keshri-pipes is the only tenant, so the slug is hardcoded here —
 // same seam as tenant_slug in main.py's Telegram webhook. Swap for a runtime
 // tenant/session value once the founder login flow exists.
 
 const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL ?? "http://localhost:8000";
-const GATEWAY_WS_URL = `${GATEWAY_URL.replace(/^http/, "ws")}/ws/founder/kesari-pipes`;
+const GATEWAY_WS_URL = `${GATEWAY_URL.replace(/^http/, "ws")}/ws/founder/keshri-pipes`;
 const RESPONSE_TIMEOUT_MS = 8000;
 
 /**

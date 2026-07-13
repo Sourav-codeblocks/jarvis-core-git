@@ -24,7 +24,6 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import chromadb
-import httpx
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from dotenv import load_dotenv
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -68,9 +67,45 @@ def _get_catalog(collection_name: str):
     return _catalog_collections[collection_name]
 
 
-OLLAMA_URL = f"{os.environ.get('OLLAMA_URL', 'http://localhost:11434')}/api/chat"
-AGENT_MODEL = "qwen2.5:7b-instruct-q8_0"  # same tag as llm_router.py's agent_turn local model
-CHAT_MODEL = "mistral:7b-instruct-q8_0"  # plain conversation, no tools — already pulled per ollama list
+import asyncio
+
+import llm_router
+import providers
+
+# Tool-deciding call needs real function-calling (structured tool_calls
+# back, not just text) — see providers.get_raw_chat_call. Groq is listed
+# first and alone for now: it's the certified, confirmed-working
+# tool-calling candidate (PROGRESS.md 2026-07-13 — tool-call format OK,
+# 336ms). ollama_local/dslab was the previous default but RunPod
+# (xl0rixu7dkzh1b) was abandoned entirely per that same session; add it
+# back to this list once a real local GPU is reachable again — same
+# "TEMP, revert once local is reliable" pattern main.py's CLOUD_PROVIDERS
+# already uses.
+TOOL_CALL_CHAIN = [("groq", "llama-3.3-70b-versatile")]
+
+# Plain-text synthesis (no tools) goes through llm_router.route()'s
+# existing agent_turn chain instead of a hardcoded single provider — same
+# Groq/Gemini fallback main.py's ask_llm() already uses.
+_TEXT_PROVIDERS = {
+    name: (lambda n: lambda model, prompt, timeout: providers.get_provider_call(n, model)(prompt, timeout))(name)
+    for name in ("groq", "gemini")
+}
+
+
+def _usage_logger_for(tenant: dict):
+    def usage_logger(task_type, model, provider, latency_ms, **usage):
+        try:
+            supabase.table("usage_events").insert({
+                "tenant_id": tenant["id"],
+                "task_type": task_type,
+                "model": model,
+                "provider": provider,
+                "latency_ms": latency_ms,
+                **usage,
+            }).execute()
+        except Exception as err:
+            print(f"founder usage_events logging failed (non-fatal): {err}")
+    return usage_logger
 
 # --- Founder tool registry -------------------------------------------------
 # Phase 0 stand-ins with the exact payload shape the frontend already
@@ -270,7 +305,7 @@ def _usage_report_data(tenant: dict) -> dict:
     return {"total_calls": sum(c["value"] for c in chart), "chart": chart}
 
 
-async def _synthesize_grounded_answer(user_text: str, data_summary: str) -> str:
+async def _synthesize_grounded_answer(user_text: str, data_summary: str, tenant: dict) -> str:
     """The actual anti-hallucination step. The model is handed ONLY the
     founder's question and the real numbers just pulled from the
     database — never the freedom to explain how it computed them, only
@@ -281,6 +316,11 @@ async def _synthesize_grounded_answer(user_text: str, data_summary: str) -> str:
     This mirrors main.py's ask_llm() catalog-grounding pattern
     ("Answer ONLY using the catalog information below") — same
     technique, applied to structured founder data instead of RAG text.
+
+    Runs through llm_router.route() (Groq/Gemini fallback chain), not a
+    direct Ollama call — RunPod (the previous backing GPU) was abandoned
+    per PROGRESS.md 2026-07-13; this matches main.py's ask_llm(), which
+    made the same migration for the Telegram path.
     """
     system_prompt = (
         "You are Jarvis, a founder's assistant. Below is REAL data just "
@@ -292,10 +332,17 @@ async def _synthesize_grounded_answer(user_text: str, data_summary: str) -> str:
         "guessing.\n\n"
         f"REAL DATA:\n{data_summary}"
     )
+    prompt = f"{system_prompt}\n\nFounder: {user_text or 'How are we doing?'}\nJarvis:"
     try:
-        data = await _call_ollama(CHAT_MODEL, system_prompt, user_text or "How are we doing?")
-        text = (data.get("message", {}).get("content") or "").strip()
-        return text or data_summary
+        text = await asyncio.to_thread(
+            llm_router.route,
+            task_type="agent_turn",
+            prompt=prompt,
+            tenant_tier=tenant.get("tier", "basic"),
+            providers=_TEXT_PROVIDERS,
+            usage_logger=_usage_logger_for(tenant),
+        )
+        return text.strip() or data_summary
     except Exception as err:
         print(f"_synthesize_grounded_answer failed: {err}")
         return data_summary  # fail toward showing the real numbers, never silence
@@ -333,7 +380,7 @@ async def get_usage_report(tenant: dict, user_text: str = "", **kwargs) -> dict:
         }
 
     data_summary = _usage_data_summary(data)
-    spoken = await _synthesize_grounded_answer(user_text, data_summary)
+    spoken = await _synthesize_grounded_answer(user_text, data_summary, tenant)
 
     return {
         "spokenAnswer": spoken,
@@ -507,6 +554,47 @@ TOOLS = [
 ]
 
 
+def _normalize_message(provider: str, raw: dict) -> dict:
+    """Groq (OpenAI-compatible) and Ollama return differently-shaped
+    responses for the same concept. This is the one place that
+    difference gets flattened, so everything downstream just deals
+    with a single {"content": ..., "tool_calls": [...]} shape."""
+    if provider == "groq":
+        return raw["choices"][0]["message"]
+    return raw.get("message", {})  # ollama's native shape
+
+
+def _parse_tool_args(raw_args) -> dict:
+    """Groq (OpenAI format) sends tool arguments as a JSON-encoded
+    string; Ollama sends them as an already-parsed dict. Handle both
+    rather than assuming one."""
+    if isinstance(raw_args, str):
+        try:
+            return json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            return {}
+    return raw_args or {}
+
+
+async def _call_tool_model(messages: list, tools: list | None = None) -> dict:
+    """Walks TOOL_CALL_CHAIN, returning the first successful provider's
+    normalized message. This is the tool-deciding call's fallback chain
+    — separate from llm_router.route() because that only returns flat
+    text, and this needs real structured tool_calls back."""
+    last_err = None
+    for provider_name, model in TOOL_CALL_CHAIN:
+        try:
+            raw = await asyncio.to_thread(
+                providers.get_raw_chat_call(provider_name, model), messages, tools, 20
+            )
+            return _normalize_message(provider_name, raw)
+        except Exception as err:
+            print(f"founder tool-call provider {provider_name}/{model} failed: {err}")
+            last_err = err
+            continue
+    raise RuntimeError(f"All tool-call providers failed; last error: {last_err}")
+
+
 TOOL_SYSTEM_PROMPT = (
     "You are Jarvis, an assistant for a startup founder. You have a "
     "small set of tools that pull real business data: revenue, runway, "
@@ -522,31 +610,6 @@ CHAT_SYSTEM_PROMPT = (
     "directly and conversationally — this response will be spoken aloud, "
     "so keep it brief and natural, not a bulleted list."
 )
-
-
-async def _call_ollama(
-    model: str, system_prompt: str, text: str, tools: list | None = None
-) -> dict:
-    """Shared low-level Ollama call, used by both the tool-deciding model
-    (qwen2.5) and the plain-conversation fallback model (llama3.1:8b)."""
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text},
-        ],
-        "stream": False,
-    }
-    if tools:
-        payload["tools"] = tools
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(OLLAMA_URL, json=payload)
-        resp.raise_for_status()
-        return resp.json()
-
-
-import asyncio
 
 
 async def invoke_tool(tool, tenant: dict, user_text: str = "", **args) -> dict:
@@ -566,30 +629,40 @@ async def invoke_tool(tool, tenant: dict, user_text: str = "", **args) -> dict:
 
 async def route_founder_query(text: str, tenant: dict) -> dict:
     """Two-tier model routing:
-      1. qwen2.5 (tool schemas attached) decides whether a founder tool
-         answers this question, and calls it if so.
-      2. If no tool fires, hand off to llama3.1:8b — a plain
-         conversational model with no tools attached — for a real
-         answer. Models tend to force a tool call when tools are
-         present even when nothing fits, which is why general/personal
-         questions came back wrong or empty before this split.
+      1. The tool-calling chain (TOOL_CALL_CHAIN, currently Groq) decides
+         whether a founder tool answers this question, and calls it if so.
+      2. If no tool fires, hand off to a plain conversational call via
+         llm_router.route() (no tools attached) for a real answer.
+         Models tend to force a tool call when tools are present even
+         when nothing fits, which is why general/personal questions
+         came back wrong or empty before this split.
+
+    Both steps now go through cloud fallback chains (Groq/Gemini) rather
+    than a direct call to RunPod's Ollama instance — that pod
+    (xl0rixu7dkzh1b) was abandoned per PROGRESS.md 2026-07-13, the exact
+    same production-reliability fix main.py's ask_llm() already got.
     """
     try:
-        data = await _call_ollama(AGENT_MODEL, TOOL_SYSTEM_PROMPT, text, tools=TOOLS)
-    except Exception as err:  # Ollama down, model not pulled, timeout, etc.
+        message = await _call_tool_model(
+            messages=[
+                {"role": "system", "content": TOOL_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            tools=TOOLS,
+        )
+    except Exception as err:  # every provider in the chain failed
         print(f"Founder routing LLM call failed: {err}")
         return {
             "spokenAnswer": "I couldn't reach the reasoning engine just now. Try again in a moment.",
             "overlay": None,
         }
 
-    message = data.get("message", {})
     tool_calls = message.get("tool_calls") or []
 
     if tool_calls:
         call = tool_calls[0]["function"]
         name = call.get("name")
-        args = call.get("arguments") or {}
+        args = _parse_tool_args(call.get("arguments"))
 
         print(f"DEBUG tool call: name={name!r} args={args!r}")
 
@@ -598,13 +671,22 @@ async def route_founder_query(text: str, tenant: dict) -> dict:
             return await invoke_tool(tool, tenant, user_text=text, **args)
 
     # No tool matched — general/personal question. Hand off to the
-    # conversational model instead of trusting qwen's own (tool-biased)
-    # reply, which is often empty or oddly terse when tools are attached.
+    # conversational model instead of trusting the tool-deciding model's
+    # own (tool-biased) reply, which is often empty or oddly terse when
+    # tools are attached.
     try:
-        chat_data = await _call_ollama(CHAT_MODEL, CHAT_SYSTEM_PROMPT, text)
-        spoken = (chat_data.get("message", {}).get("content") or "").strip()
+        prompt = f"{CHAT_SYSTEM_PROMPT}\n\nFounder: {text}\nJarvis:"
+        spoken = await asyncio.to_thread(
+            llm_router.route,
+            task_type="agent_turn",
+            prompt=prompt,
+            tenant_tier=tenant.get("tier", "basic"),
+            providers=_TEXT_PROVIDERS,
+            usage_logger=_usage_logger_for(tenant),
+        )
+        spoken = spoken.strip()
     except Exception as err:
-        print(f"Conversational fallback (llama3.1:8b) call failed: {err}")
+        print(f"Conversational fallback call failed: {err}")
         spoken = ""
 
     return {
