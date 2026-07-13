@@ -13,7 +13,9 @@ source .env
 curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://NEW-NGROK-URL.ngrok-free.dev/webhook/telegram"
 
 ## End a session
-# 1. Update PROGRESS.md (what got done + NEXT line)
+# 1. Update PROGRESS.md (what got done + NEXT line) AND README.md (if
+#    architecture/infra/files changed — not every session needs this,
+#    but check). Starting 2026-07-13: both, every session, not just PROGRESS.
 # 2. git add -A && git commit -m "..."
 
 ## Reference

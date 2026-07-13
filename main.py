@@ -8,12 +8,61 @@ passes through here: identify tenant -> identify user -> toleration check
 
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
+import founder_reports
+from founder_ws import router as founder_router
+from voice_bridge import router as voice_router
+from tts import router as tts_router
 
 load_dotenv()  # pulls SUPABASE_URL, SUPABASE_SECRET_KEY, etc. from .env
 
 app = FastAPI(title="Jarvis Core Gateway")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.environ.get("FOUNDER_UI_ORIGIN", "http://localhost:3000")],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+FOUNDER_API_KEY = os.environ["FOUNDER_API_KEY"]
+
+def _check_founder_key(request: Request):
+    if request.headers.get("x-founder-key") != FOUNDER_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+@app.get("/api/founder/reports")
+def founder_reports_list(request: Request):
+    _check_founder_key(request)
+    return founder_reports.get_all_reports(supabase)
+
+@app.get("/api/founder/reports/{report_id}")
+def founder_report_detail(report_id: str, request: Request):
+    _check_founder_key(request)
+    report = founder_reports.get_report(supabase, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Unknown report")
+    return report
+
+@app.post("/api/founder/query")
+async def founder_query(request: Request):
+    _check_founder_key(request)
+    body = await request.json()
+    report_id = founder_reports.route_query(body.get("query", ""))
+    report = founder_reports.get_report(supabase, report_id)
+    return {"spokenAnswer": report["spokenAnswer"], "overlay": report["overlay"]}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(founder_router)
+app.include_router(voice_router)
+app.include_router(tts_router)
 
 supabase = create_client(
     os.environ["SUPABASE_URL"],
@@ -118,7 +167,7 @@ async def ask_llm(user_text: str, history: list[dict]) -> str:
     )
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
-            "http://localhost:11434/api/chat",
+            f"{OLLAMA_URL}/api/chat",
             json={
                 "model": "llama3.2:3b-instruct-q8_0",
                 "messages": [

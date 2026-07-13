@@ -1,80 +1,29 @@
-# Jarvis Core — Multi-Tenant Agentic Platform
+# Jarvis Core — Phase 0 Seed
 
-Jarvis is a multi-tenant AI assistant platform. A single **Core Gateway** owns all
-conversational logic, tenant state, and tool access; every surface the customer
-talks to — Telegram today, a Next.js web app and a real-time voice agent next —
-is just another **client** of that same gateway. This folder holds the Phase 0
-seed: the architectural decisions that must be right on day one, so tenants 2–10
-become config rows instead of rewrites, and new channels become adapters instead
-of forks.
+This folder is the foundation of the multi-tenant agentic platform. It encodes the
+architectural decisions that must be right on day one, so tenants 2–10 become
+config rows instead of rewrites.
 
 ## The One Rule
 **`tenant_id` flows through everything** — every table, every Chroma collection,
-every LangGraph thread ID, every usage log row, every channel adapter (Telegram,
-web, voice). This is the difference between a platform and a pile of scripts.
+every LangGraph thread ID, every usage log row. This is the difference between a
+platform and a pile of scripts.
 
-## System Overview
+## High-Level Flow
 
+```mermaid
+flowchart LR
+    TG[Telegram / WhatsApp webhook] --> GW[Gateway - FastAPI]
+    GW --> TOL[Toleration middleware\ntoleration.py]
+    TOL -->|PASS| RT[Router\nintent + retrieval strategy]
+    TOL -->|SOFT_REDIRECT / HARD_IGNORE| OUT
+    RT --> LG[Tenant LangGraph\nloaded from tenant config]
+    LG --> MCP[MCP tools\nmounted per tenant_tools table]
+    MCP --> LG
+    LG --> HITL{HITL gate?\ninterrupt}
+    HITL -->|approved| OUT[Outbound reply via channel adapter]
+    LG --> USE[(usage_events\nPostgres)]
 ```
-                     ┌───────────────────────────────────────────┐
-                     │              JARVIS CORE GATEWAY           │
-                     │            (FastAPI — main.py)             │
-                     │                                             │
-Telegram  ─────────▶│  Toleration → Router → Tenant LangGraph      │
-(webhook, live)      │        │            │            │         │
-                     │        │            ▼            │         │
-Web/Voice  ─────────▶│        │      MCP tools per       │        │
-(Lovable/Next.js,    │        │      tenant_tools table   │       │
- planned)            │        │            │              │      │
-                     │        ▼            ▼              ▼      │
-                     │   Postgres    Chroma (RAG)    usage_events │
-                     │  (Supabase)   per-tenant KB     (cost/lat) │
-                     └───────────────────────────────────────────┘
-```
-
-Every client — Telegram bot or web/voice frontend — is a thin adapter that
-speaks the gateway's internal event schema. None of them own conversation
-state or business logic; the gateway does, backed by Postgres.
-
-### Planned real-time voice path (Lovable/Next.js frontend)
-
-The web frontend (scaffolded with Lovable + Next.js) is being extended with a
-voice agent. Because voice needs full-duplex, low-latency exchange rather than
-one-shot request/response, it will **not** use the REST pattern that Telegram's
-webhook uses. Instead:
-
-```
-Browser mic (Web Audio API)
-   │  binary audio chunks
-   ▼
-WebSocket / WebRTC  ──────────────▶  Jarvis Core Gateway (orchestrator)
-                                          │
-                                          ├─▶ STT (e.g. Deepgram) → text
-                                          ├─▶ same LLM router + tenant LangGraph
-                                          │   used by the Telegram path
-                                          └─▶ TTS (e.g. ElevenLabs) → audio
-                                          │
-   ◀───────────────────────────────────────  streamed status + audio events
-Browser speaker / UI "speaking" indicator
-```
-
-Key behaviors this path needs to match Telegram's fluidity:
-- **Status events**, not just final replies — `{"type": "status", "content": "thinking"}`
-  drives a "typing/speaking" indicator, the voice equivalent of Telegram's
-  "bot is typing…".
-- **Barge-in**: if the user starts speaking while TTS audio is playing, the
-  gateway sends `{"type": "stop_audio"}` and clears the playback buffer
-  immediately — otherwise it feels like a broadcast, not a conversation.
-- **Shared state**: the web/voice session and a user's Telegram session for
-  the same tenant read and write the same `users` / `messages` rows, so the
-  agent doesn't "forget" context when a customer switches channels.
-- **Server-side secrets only**: STT/TTS/LLM API keys stay on the gateway; the
-  browser only ever holds a short-lived session token.
-
-This is additive to the existing architecture, not a replacement — Telegram
-keeps using the webhook/REST path in `main.py`; voice gets a new WebSocket
-route on the same gateway, and both funnel into the same toleration → router →
-LangGraph → usage_events pipeline.
 
 ## The Switchbox — how it actually works
 MCP gives every tool the same plug shape. The tier toggle is **not** MCP itself —
@@ -84,7 +33,6 @@ CRUD on that table:
 
 - Tenant upgrades to premium → flip `channel.whatsapp` to enabled, `channel.telegram` off.
 - Enable `crm.gohighlevel` for a pro tenant → one row update.
-- Enable the voice channel for a tenant → flip `channel.voice_web` on, same pattern.
 - Agent code never changes. That is the whole trick.
 
 ## Model Routing (llm_router.py)
@@ -96,66 +44,22 @@ CRUD on that table:
 | escalation | Claude Sonnet (cloud, premium tier only) | hard reasoning |
 
 Research strategy is a router flag, not a separate system: fresh/current info →
-web_search tool; tenant knowledge → RAG on the tenant's Chroma collection. The
-voice path reuses this exact router for the "brain" step — only the I/O layer
-(STT in, TTS out) is new.
+web_search tool; tenant knowledge → RAG on the tenant's Chroma collection.
 
-## Tech Stack
-
-| Layer | Choice | Notes |
-|---|---|---|
-| Core gateway | FastAPI (Python) | single entry point for all channels |
-| Database | Postgres via Supabase | tenants, users, messages, usage_events |
-| Vector store | ChromaDB (per-tenant collection) | RAG grounding, local + free |
-| Chat channel (live) | Telegram Bot API, webhook | Phase 0 slice, working end-to-end |
-| Web frontend (in progress) | Next.js, scaffolded via Lovable | chat UI + voice agent |
-| Realtime transport (planned) | WebSockets / WebRTC | full-duplex voice, replaces REST for this path |
-| STT (planned) | Deepgram (or equivalent) | low-latency speech-to-text |
-| TTS (planned) | ElevenLabs (or equivalent) | low-latency, natural voice |
-| Shared session state (planned) | Redis (or existing Postgres tables) | cross-channel conversation continuity |
-| LLM providers | Ollama (local: llama3.2, qwen2.5, mistral) + Anthropic API (Haiku/Sonnet fallback) | matrix in `llm_router.py` |
-
-## Key Features
-- **Cross-platform persistence** — a customer's conversation state (and
-  `moderation_state` strikes) is tenant + user scoped in Postgres, so Telegram
-  and the web/voice frontend are two windows onto the same conversation, not
-  two separate bots.
-- **Real-time voice streaming (planned)** — WebSocket/WebRTC transport, STT →
-  LLM router → TTS, with status events driving UI indicators.
-- **Interruptible audio / barge-in (planned)** — user speech mid-playback
-  immediately halts and clears the TTS buffer.
-- **Strike-based toleration middleware** — keeps a public-facing bot from
-  burning compute on off-topic chatter, with reputation-based slack.
-- **Tenant switchbox** — per-tenant tool/channel enablement is a database row,
-  never a code change.
-- **HITL gates** — payments and large orders always pause for human approval.
+Fallback chains make future infrastructure (own GPUs, cloud pools, load
+balancing) a config change: `[own_gpu, cloud_api]` replaces `[ollama_local, cloud_api]`.
 
 ## Production corrections to the lab patterns
 - `MemorySaver` is in-memory only. Production uses **LangGraph's Postgres
   checkpointer** so paused HITL approvals survive restarts.
 - Secrets never live in the DB — `api_key_refs` stores pointers to env vars /
-  secret manager, not raw keys. The same rule applies to future STT/TTS keys:
-  gateway-side only, never shipped to the browser.
+  secret manager, not raw keys.
 - Every money-touching action (payments, large orders, B2C renewals) goes through
   a mandatory HITL `interrupt()` gate — the exact pattern from the HITL lab.
 
 ## Phase Plan
-- **Phase 0 (done):** One tenant (Kesari Pipes), Telegram, local Chroma
-  RAG, Postgres schema, toleration middleware, usage logging. End-to-end
-  slice, working live.
-- **Phase 0.5 (done):** Founder's Core — a second, business-owner-facing
-  frontend with a real, working voice pipeline:
-  - Mic → Deepgram live STT → real tool-calling (qwen2.5:7b via Ollama)
-    → founder tool registry → spoken answer (Deepgram Aura-2 TTS) +
-    visual overlay (chart/gauge/table/report), all over WebSocket.
-  - Two-tier LLM routing: qwen2.5 (tools attached) decides if a founder
-    report answers the question; if not, llama3.1:8b (no tools) gives a
-    real conversational answer instead of forcing a bad tool match.
-  - Two tools wired to real data (`usage_events` via Supabase,
-    the product catalog via ChromaDB); four more still fixtures.
-  - Continuous "Call" mode with barge-in — Jarvis stops talking the
-    instant the founder starts speaking again.
-  - Full architecture reference: see `WORKING.md`.
+- **Phase 0 (now):** this seed. One tenant (Kesari), Telegram, local Chroma,
+  Postgres schema, toleration middleware, usage logging. End-to-end slice.
 - **Phase 1:** Founder Dashboard (Streamlit) — reads `usage_events`, toggles
   `tenant_tools`. Role-based views (owner vs operator) per the earlier design.
 - **Phase 2:** Second tenant onboarded purely via config to prove isolation.
@@ -165,32 +69,92 @@ voice path reuses this exact router for the "brain" step — only the I/O layer
 
 ## Files
 - `schema.sql` — the multi-tenant foundation (run against Postgres/Supabase)
-- `main.py` — FastAPI gateway; mounts the Telegram, founder chat, voice, and TTS routers
-- `founder_ws.py` — founder tool registry + two-tier LLM routing (qwen2.5 → llama3.1:8b)
-- `voice_bridge.py` — bridges browser mic audio to Deepgram live STT
-- `tts.py` — proxies text to Deepgram Aura-2 TTS
-- `toleration.py` — strike system with reputation-based limits (Telegram path only)
-- `llm_router.py` — model matrix + provider fallback chain
-- `ingest.py` — per-tenant catalog → ChromaDB ingest with dedup
+- `toleration.py` — strike system with reputation-based limits
+- `llm_router.py` — model matrix + provider fallback chain (also the eval
+  engine's provider layer — see below)
 - `tenant.kesari.example.yaml` — tenant = config, never code
-- `WORKING.md` — full flow/architecture reference for the voice pipeline
-- `frontend/` — customer-facing HUD (Next.js, via Lovable)
-- `founders-core/` — business-owner HUD with voice, reports, and visual overlays
 
-## What's needed next (build queue)
-1. Wire the remaining four founder tools (revenue, runway, pipeline,
-   briefing) to real Postgres/CRM data — currently fixtures.
-2. Conversation memory for the founder path — every query is stateless
-   right now (no `get_recent_history()` equivalent), so "what did I say
-   earlier" style questions can't work yet.
-3. `usage_events` logging for founder queries (Telegram logs every call;
-   the founder path doesn't yet).
-4. Tenant-dynamic resolution — `tenant_id` is hardcoded to 1 throughout
-   the founder/voice path, same seam as the Telegram webhook.
-5. Fix the Chroma collection name mismatch (`kb_keshri_pipes` vs.
-   `kb_kesari_pipes` in schema.sql) flagged in `code_review.md`.
-6. Consolidate `founder_ws.py`'s direct Ollama calls into `llm_router.py`'s
-   routing/fallback chain instead of a separate code path.
-7. `standard_business_v1` LangGraph (analyse → act → HITL gate → respond).
-8. MCP server skeleton for the first tool + client-side mounting from `tenant_tools`.
-9. Postgres checkpointer wiring for LangGraph.
+## Eval Engine (Phase 0.5)
+Added 2026-07-12, first real data 2026-07-13. A separate, out-of-band system
+for grading candidate models BEFORE they get promoted into `llm_router.py`'s
+`MODEL_MATRIX`. Not part of the production request path — a bug in the eval
+engine cannot take down the Telegram webhook or the founder voice pipeline.
+
+**Infra roles (as of 2026-07-13 — this section is the source of truth, not
+any chat transcript):**
+| Box | Role | Status |
+|---|---|---|
+| dslab (172.18.40.103, SSH tunnel) | Production inference (main.py) + sole eval candidate source right now | Live, campus-network only |
+| RunPod | Was meant to host eval candidates | **Abandoned** — Community Cloud GPU reclaim persisted across every check; see PROGRESS.md 2026-07-13. Backlog: real replacement after July 18 |
+| Together.ai | Candidate/judge option | Wired, unused — requires $5 minimum deposit before any call works, no free tier confirmed live |
+| NVIDIA NIM | Candidate/judge option | Wired, unused — model name is an unverified guess, do not trust scores from it yet |
+| DigitalOcean VM | Eval orchestrator (`eval_api.py`), separate FastAPI process from the gateway; ALSO hosts the founder voice pipeline's frontends (see below) | No GPU |
+| Gemini, Groq | Judges | Both confirmed working (Gemini needs `X-goog-api-key` header + `-latest` model alias, see PROGRESS.md) |
+| Anthropic | Judge | Wired, key currently invalid (401), deferred |
+
+**Flow:** `generate` (candidate) → `tier1_rules` (local regex/keyword/language
+checks, free) → conditional skip on hard-fail → `tier2_judge` (CRAFT rubric:
+correctness, relevance, adherence, faithfulness, tone) → `aggregate` →
+`persist` (Supabase `llm_evaluations`).
+
+**Turning a run into a verdict:** `catalog_from_run.py <run_id>` computes
+stats via `scorecard.compute_stats()` and upserts a `model_catalog` row with
+a green/yellow/red `signal`. This is manual today — the seed of a future
+"run via button" flow, not the flow itself yet.
+
+**Real results as of 2026-07-13** (dslab only — see PROGRESS.md for the
+cross-judge detail): qwen2.5:7b-instruct 🟡 YELLOW (75-80%, cross-judged),
+llama3.2:3b-instruct 🔴 RED (55%), mistral:7b-instruct 🔴 RED (30%, single
+judge only).
+
+**Files:** `eval_cases.py` (20-case test grid, 5 categories, Kesari-only —
+tenant-aware refactor still pending), `eval_graph.py` (LangGraph),
+`eval_api.py` (FastAPI orchestrator), `scorecard.py` (report + signal
+computation), `catalog_from_run.py`, `model_catalog_schema.sql` +
+`model_catalog_add_signal.sql`, `eval_schema.sql`, `debug_judge.py` /
+`list_gemini_models.py` (diagnostic tools, keep these — they're what
+actually found both Gemini bugs).
+
+See `PROGRESS.md` 2026-07-12 and 2026-07-13 entries for the full decision
+log, including the RunPod outage, the Together/NIM investigation, and the
+known gap where `model_catalog` can't yet hold more than one judge's
+verdict per model without overwriting.
+
+## Founder Voice Pipeline
+Discovered/connected to this thread 2026-07-13; documented in full in
+`WORKING.md` (the authoritative reference — this is a pointer, not a copy).
+A second, already-live system: talk to Jarvis by voice or typed chat as the
+founder, get spoken answers backed by real tool-calling.
+
+**Two frontends, one gateway:** `frontend/` (customer HUD) and
+`founders-core/` (founder HUD) are both thin clients over `main.py` — no
+logic lives in either UI. Live at https://159.89.166.167.sslip.io/ (DO VM).
+Source: https://github.com/Sourav-codeblocks/jarvis-core-git.
+
+**Six-hop flow:** browser mic → `voice_bridge.py` → Deepgram (nova-3 STT) →
+`founder_ws.py`'s `route_founder_query()` (real LLM tool-calling via
+`qwen2.5:7b` over the dslab tunnel) → the matching tool function → Postgres/
+ChromaDB → spoken answer → Deepgram Aura-2 TTS → browser.
+
+**Mock vs. real, as of today:** `get_usage_report` and `get_catalog_report`
+are real (query Supabase/ChromaDB). `get_revenue_report`, `get_runway_report`,
+`get_pipeline_report`, `get_briefing_report` are mock fixtures — this is
+what the "REPORTS" panel on the live HUD is actually showing right now.
+
+**Does NOT talk to the eval engine.** No tool queries `model_catalog` or
+`llm_evaluations` yet — asking the founder HUD about model eval results
+will not work until that tool is built. See PROGRESS.md NEXT list.
+
+**Known gaps** (documented in `WORKING.md`, repeated here since they overlap
+with eval-engine work): `tenant_id` hardcoded to 1, same as `main.py`;
+`route_founder_query()` bypasses `llm_router.py` entirely, calls Ollama
+direct; no `usage_events` logging for founder queries; the
+`kb_keshri_pipes` vs `kb_kesari_pipes` Chroma name mismatch
+(code_review.md #4) is present here too, still unfixed anywhere.
+
+## What Phase 0 still needs built (next sessions)
+1. FastAPI gateway with Telegram webhook (you know this from Sprout)
+2. `standard_business_v1` LangGraph (analyse → act → HITL gate → respond)
+3. Per-tenant ingest script (Chroma collection per tenant)
+4. MCP server skeleton for the first tool + client-side mounting from `tenant_tools`
+5. Postgres checkpointer wiring
