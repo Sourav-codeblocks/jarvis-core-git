@@ -41,14 +41,16 @@ MODEL_MATRIX = {
         ("gemini", "gemini-flash-lite-latest"),
         ("groq", "llama-3.1-8b-instant"),
     ],
-    # Tool-calling agent turns (proven need for qwen-class locally; cloud
-    # fallbacks must pass the tool_call format check in certify_model.py):
+    # TEMP (2026-07-13, demo week): RunPod terminated, dslab GPU not
+    # reliable -- agent_turn runs on Groq/Gemini free tier ONLY until a
+    # rented GPU cluster is up. ollama_local/openrouter/anthropic_api
+    # removed from THIS chain only (not touched elsewhere) so the router
+    # doesn't waste a timeout on a dead local endpoint or reach for a paid
+    # provider by accident. Put ollama_local back at the front once local
+    # inference is reliable again -- ordering elsewhere is untouched.
     "agent_turn": [
-        ("ollama_local", "qwen2.5:7b-instruct-q8_0"),
-        ("gemini", "gemini-flash-latest"),
-        ("groq", "llama-3.3-70b-versatile"),
-        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
-        ("anthropic_api", "claude-haiku-4-5-20251001"),
+        ("groq", "llama-3.3-70b-versatile"),   # CERTIFIED GREEN (PROGRESS.md 2026-07-13)
+        ("gemini", "gemini-flash-latest"),     # currently RED/contested -- re-certify after quota reset; harmless to leave here, router skips non-green/yellow automatically
     ],
     # Longer prose / drafting:
     "draft": [
@@ -61,8 +63,11 @@ MODEL_MATRIX = {
     "escalation": [("anthropic_api", "claude-sonnet-4-6")],
 }
 
-# Premium tenants may escalate; basic tenants stay local-only.
-TIER_ALLOWS_CLOUD = {"basic": False, "pro": True, "premium": True}
+# TEMP (2026-07-13, demo week): basic tenants normally stay local-only, but
+# local (RunPod/dslab) is down and Groq/Gemini are free tier right now, so
+# basic is allowed cloud too. Revert to False once local is reliable again
+# and cost-bearing cloud needs the real pro/premium gate back.
+TIER_ALLOWS_CLOUD = {"basic": True, "pro": True, "premium": True}
 
 PROVIDER_TIMEOUT_S = {
     "ollama_local": 60,

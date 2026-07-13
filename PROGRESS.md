@@ -338,3 +338,18 @@ having been uploaded/tested against the real stack):**
   message + /health, THEN commit+push. Do this before starting the
   actual production fix (llm_router.route() wiring into main.py /
   founder_ws.py) so the two changes don't get tangled in one commit.
+
+## 2026-07-13 — Session 4 (late night) — production restored
+- Finished the tenant-resolution deploy from earlier tonight (db_client.py
+  was missing resolve_tenant/UnknownTenant on the VM; added, deployed, verified)
+- Wired main.py's ask_llm() to llm_router.route() -- replaces the dead
+  RunPod call. agent_turn temporarily Groq+Gemini only (ollama_local/
+  openrouter/anthropic_api removed from this chain only until local GPU
+  cluster is ready)
+- TIER_ALLOWS_CLOUD: basic temporarily allowed cloud (was local-only) --
+  revert once local is reliable again
+- CONFIRMED: real Telegram message -> Groq reply -> correct catalog
+  grounding, end to end, live on the VM
+- NEXT: wire LLM to product_catalog properly + eval testing against real
+  DB queries; re-certify gemini/flash-latest for agent_turn after quota
+  reset; revert the two TEMP gates once local GPU cluster is up

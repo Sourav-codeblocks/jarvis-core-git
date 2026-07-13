@@ -306,3 +306,12 @@ log.
   `tenant_tools` stays the on/off switch per tenant/channel either way.
 - **Phase 2:** Second tenant onboarded purely via config to prove isolation.
 - **Phase 3:** B2C Life OS module — deferred deliberately, per original plan.
+
+**Status update, 2026-07-13 (late night):** the wiring landed. `main.py`'s
+Telegram path now calls `llm_router.route()` for real instead of hitting
+Ollama/RunPod directly. `agent_turn` is temporarily restricted to
+Groq/Gemini only (certified: groq/llama-3.3-70b-versatile green) until a
+rented GPU cluster replaces RunPod. **Bot confirmed live and replying in
+Telegram again.** `basic` tier temporarily allowed cloud (TIER_ALLOWS_CLOUD)
+since local is down — revert once local inference is back and paid-cloud
+tenants need the real gate.
