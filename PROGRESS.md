@@ -315,3 +315,26 @@ having been uploaded/tested against the real stack):**
 - NOTE: messages table already EXISTS in live Supabase but is missing from schema.sql on disk — sync schema.sql to match reality (closes code_review.md item #1)
 - ⚠️ SECURITY: rotate GEMINI_API_KEY (full key appeared in pasted terminal logs) — delete in AI Studio, create new, update .env
 - NEXT: re-certify gemini flash for agent_turn after quota reset; add 429-aware retry to certify_model.py; sync messages table into schema.sql
+
+## 2026-07-13 — Session 3 (evening, cont'd)
+- Tenant-dynamic resolution files (db_client.py, main.py, founder_ws.py,
+  voice_bridge.py) copied into working tree from Claude-generated patch,
+  originals backed up to .backup_pre_tenant_fix/. TENANT_SLUG=keshri-pipes
+  added to .env.
+- INTERRUPTED MID-DEPLOY — got pulled into n8n architecture discussion
+  before finishing. Current state of these 4 files: NOT syntax-checked,
+  NOT committed, NOT pushed. founder_reports.py stub NOT yet created
+  (main.py will crash on import without it). Gateway NOT restarted —
+  moot anyway since production is separately down (RunPod terminated,
+  see status note at top of README).
+- Decided: chat-channel adapters (Telegram now, WhatsApp/Slack later)
+  will move to n8n eventually — Python keeps a thin POST /api/v1/chat,
+  n8n owns platform credentials + payload parsing. Documented in
+  README.md Phase Plan + Known Gaps, committed + pushed (067ec6b).
+  This does NOT apply to founder_ws.py/voice_bridge.py (stay custom
+  Python — persistent WebSocket, n8n can't hold that open).
+- NEXT: finish the tenant-resolution deploy — py_compile the 4 files,
+  create founder_reports.py stub, restart gateway, verify via Telegram
+  message + /health, THEN commit+push. Do this before starting the
+  actual production fix (llm_router.route() wiring into main.py /
+  founder_ws.py) so the two changes don't get tangled in one commit.
