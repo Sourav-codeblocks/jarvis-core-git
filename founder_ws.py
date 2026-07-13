@@ -427,6 +427,10 @@ async def route_founder_query(text: str, tenant_id: int) -> dict:
         call = tool_calls[0]["function"]
         name = call.get("name")
         args = call.get("arguments") or {}
+	HEAD
+
+        print(f"DEBUG tool call: name={name!r} args={args!r}")
+	0a01ef885a09db033cc4ebce2b8e909e59bc8c95
         tool = FOUNDER_TOOLS.get(name)
         if tool:
             return tool(tenant_id, **args)
