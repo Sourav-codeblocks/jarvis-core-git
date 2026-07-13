@@ -30,6 +30,7 @@ import websockets
 from dotenv import load_dotenv
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from db_client import resolve_tenant, UnknownTenant
 from founder_ws import route_founder_query
 
 load_dotenv()  # self-sufficient: don't depend on main.py's import order
@@ -56,8 +57,17 @@ async def _connect_deepgram():
 
 @router.websocket("/ws/founder/{tenant_slug}/voice")
 async def founder_voice_socket(websocket: WebSocket, tenant_slug: str):
+    # Resolve before accepting: no point opening a Deepgram connection
+    # (which costs money the moment it's live) for a tenant_slug that
+    # doesn't exist. Same fix as founder_ws.py's chat socket — this path
+    # took a tenant_slug in the URL but ignored it in favor of tenant_id=1.
+    try:
+        tenant = resolve_tenant(tenant_slug)
+    except UnknownTenant:
+        await websocket.close(code=4404, reason=f"Unknown tenant: {tenant_slug}")
+        return
+
     await websocket.accept()
-    tenant_id = 1  # Phase 0: same seam as founder_ws.py / main.py
 
     dg_ws = await _connect_deepgram()
 
@@ -88,7 +98,7 @@ async def founder_voice_socket(websocket: WebSocket, tenant_slug: str):
             # not just that this chunk's wording is locked in.
             if is_final and msg.get("speech_final"):
                 await websocket.send_json({"type": "status", "content": "thinking"})
-                result = await route_founder_query(transcript, tenant_id)
+                result = await route_founder_query(transcript, tenant["id"])
                 await websocket.send_json(
                     {
                         "type": "response",

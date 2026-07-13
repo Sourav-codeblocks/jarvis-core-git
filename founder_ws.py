@@ -28,41 +28,44 @@ import httpx
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from dotenv import load_dotenv
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from supabase import create_client
+
+from db_client import get_supabase, resolve_tenant, UnknownTenant
 
 load_dotenv()  # self-sufficient — don't depend on main.py's import order
 
 router = APIRouter()
 
-supabase = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_SECRET_KEY"],
-)
+supabase = get_supabase()  # shared client, same instance main.py and db_client use
 
 _chroma = chromadb.PersistentClient(path="chroma_db")
-_catalog_collection = None
+_catalog_collections: dict[str, "chromadb.Collection"] = {}
 
 
-def _get_catalog():
-    """Lazy-loaded so importing this module doesn't blow up if chroma_db
-    or the collection isn't there yet. Same collection ingest.py
-    populates and main.py's RAG path already queries.
+def _get_catalog(collection_name: str):
+    """Lazy-loaded, per-tenant, and cached by collection name so importing
+    this module doesn't blow up if chroma_db or the collection isn't there
+    yet. Same collections ingest.py populates and main.py's RAG path
+    already queries.
 
-    NOTE: main.py hardcodes "kb_keshri_pipes" (the spelling actually used
-    on disk, per PROGRESS.md); schema.sql's seed row uses
-    "kb_kesari_pipes" instead — the same discrepancy code_review.md
-    already flagged. Using the disk spelling here to match what's
-    actually populated.
+    Was hardcoded to "kb_keshri_pipes" — fine while there was exactly one
+    tenant, but it meant every tenant's founder catalog search would have
+    silently searched tenant #1's data. Callers now pass the tenant's own
+    `chroma_collection` value (resolved via db_client.resolve_tenant).
+
+    NOTE: schema.sql's seed row says "kb_kesari_pipes" while the collection
+    actually populated on disk (per PROGRESS.md / ingest.py runs) is
+    "kb_keshri_pipes" — the spelling mismatch code_review.md already
+    flagged (build-queue item 5, not fixed here). Align the DB row before
+    relying on this for a real second tenant.
     """
-    global _catalog_collection
-    if _catalog_collection is None:
-        _catalog_collection = _chroma.get_collection(
-            name="kb_keshri_pipes",
+    if collection_name not in _catalog_collections:
+        _catalog_collections[collection_name] = _chroma.get_collection(
+            name=collection_name,
             embedding_function=SentenceTransformerEmbeddingFunction(
                 model_name="all-MiniLM-L6-v2"
             ),
         )
-    return _catalog_collection
+    return _catalog_collections[collection_name]
 
 
 OLLAMA_URL = f"{os.environ.get('OLLAMA_URL', 'http://localhost:11434')}/api/chat"
@@ -76,7 +79,7 @@ CHAT_MODEL = "mistral:7b-instruct-q8_0"  # plain conversation, no tools — alre
 # the contract, so the frontend never needs to change.
 
 
-def get_revenue_report(tenant_id: int, **kwargs) -> dict:
+def get_revenue_report(tenant: dict, **kwargs) -> dict:
     return {
         "spokenAnswer": (
             "Revenue is trending up eighteen percent week over week. "
@@ -98,7 +101,7 @@ def get_revenue_report(tenant_id: int, **kwargs) -> dict:
     }
 
 
-def get_runway_report(tenant_id: int, **kwargs) -> dict:
+def get_runway_report(tenant: dict, **kwargs) -> dict:
     return {
         "spokenAnswer": "Runway is healthy. Burn within tolerance across all subsystems.",
         "overlay": {
@@ -114,7 +117,7 @@ def get_runway_report(tenant_id: int, **kwargs) -> dict:
     }
 
 
-def get_pipeline_report(tenant_id: int, **kwargs) -> dict:
+def get_pipeline_report(tenant: dict, **kwargs) -> dict:
     return {
         "spokenAnswer": "Displaying open pipeline. Two deals flagged urgent.",
         "overlay": {
@@ -134,7 +137,7 @@ def get_pipeline_report(tenant_id: int, **kwargs) -> dict:
     }
 
 
-def get_briefing_report(tenant_id: int, **kwargs) -> dict:
+def get_briefing_report(tenant: dict, **kwargs) -> dict:
     return {
         "spokenAnswer": "Compiled briefing ready. Highlights on screen.",
         "overlay": {
@@ -151,7 +154,7 @@ def get_briefing_report(tenant_id: int, **kwargs) -> dict:
     }
 
 
-def get_usage_report(tenant_id: int, **kwargs) -> dict:
+def get_usage_report(tenant: dict, **kwargs) -> dict:
     """First real-data founder tool — everything else here is still a
     Phase 0 fixture. Pulls actual usage_events rows for the last 7 days
     and buckets them by day. No new schema needed; usage_events already
@@ -162,7 +165,7 @@ def get_usage_report(tenant_id: int, **kwargs) -> dict:
         rows = (
             supabase.table("usage_events")
             .select("created_at")
-            .eq("tenant_id", tenant_id)
+            .eq("tenant_id", tenant["id"])
             .gte("created_at", since)
             .execute()
         ).data
@@ -201,7 +204,7 @@ def get_usage_report(tenant_id: int, **kwargs) -> dict:
     }
 
 
-def get_catalog_report(tenant_id: int, query: str = "", **kwargs) -> dict:
+def get_catalog_report(tenant: dict, query: str = "", **kwargs) -> dict:
     """Second real-data founder tool — searches the tenant's Chroma
     catalog collection (see ingest.py / main.py's RAG path). If the model
     extracted a specific product/category from the question, this runs a
@@ -209,7 +212,7 @@ def get_catalog_report(tenant_id: int, query: str = "", **kwargs) -> dict:
     generic sample (.get()) since there's nothing to match against.
     """
     try:
-        collection = _get_catalog()
+        collection = _get_catalog(tenant["chroma_collection"])
         if query.strip():
             result = collection.query(
                 query_texts=[query], n_results=8, include=["metadatas"]
@@ -401,7 +404,7 @@ async def _call_ollama(
         return resp.json()
 
 
-async def route_founder_query(text: str, tenant_id: int) -> dict:
+async def route_founder_query(text: str, tenant: dict) -> dict:
     """Two-tier model routing:
       1. qwen2.5 (tool schemas attached) decides whether a founder tool
          answers this question, and calls it if so.
@@ -427,13 +430,10 @@ async def route_founder_query(text: str, tenant_id: int) -> dict:
         call = tool_calls[0]["function"]
         name = call.get("name")
         args = call.get("arguments") or {}
-	HEAD
-
         print(f"DEBUG tool call: name={name!r} args={args!r}")
-	0a01ef885a09db033cc4ebce2b8e909e59bc8c95
         tool = FOUNDER_TOOLS.get(name)
         if tool:
-            return tool(tenant_id, **args)
+            return tool(tenant, **args)
 
     # No tool matched — general/personal question. Hand off to the
     # conversational model instead of trusting qwen's own (tool-biased)
@@ -456,11 +456,19 @@ async def route_founder_query(text: str, tenant_id: int) -> dict:
 async def founder_socket(websocket: WebSocket, tenant_slug: str):
     """One persistent connection per founder chat session.
 
-    Phase 0: tenant_id hardcoded to 1 — same seam as the Telegram webhook
-    in main.py.
+    tenant_slug was already part of the URL — the frontend has been
+    sending it since this route was written — but the handler threw it
+    away and hardcoded tenant_id = 1 underneath. Now it's actually used:
+    a bad/unknown slug gets a clean close instead of silently answering
+    with tenant #1's data.
     """
+    try:
+        tenant = resolve_tenant(tenant_slug)
+    except UnknownTenant:
+        await websocket.close(code=4404, reason=f"Unknown tenant: {tenant_slug}")
+        return
+
     await websocket.accept()
-    tenant_id = 1
 
     try:
         while True:
@@ -476,7 +484,7 @@ async def founder_socket(websocket: WebSocket, tenant_slug: str):
             text = msg.get("text", "")
 
             await websocket.send_json({"type": "status", "content": "thinking"})
-            result = await route_founder_query(text, tenant_id)
+            result = await route_founder_query(text, tenant)
             await websocket.send_json(
                 {
                     "type": "response",
