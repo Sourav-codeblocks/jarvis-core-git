@@ -71,10 +71,10 @@ USAGE_GROUNDING_CASES = [
 ]
 
 
-async def run_case(case: UsageGroundingCase, tenant_id: int) -> dict:
+async def run_case(case: UsageGroundingCase, tenant: dict) -> dict:
     # Ground truth computed fresh, same query production runs — not a
     # fixture, not a stored value from an earlier session.
-    ground_truth = founder_ws._usage_report_data(tenant_id)
+    ground_truth = founder_ws._usage_report_data(tenant)
 
     # Real numbers = every digit sequence in the EXACT text the model was
     # shown (via _usage_data_summary), not just the chart values. This
@@ -85,7 +85,7 @@ async def run_case(case: UsageGroundingCase, tenant_id: int) -> dict:
     data_summary = founder_ws._usage_data_summary(ground_truth)
     real_numbers = set(re.findall(r"\b\d+\b", data_summary))
 
-    result = await founder_ws.get_usage_report(tenant_id, user_text=case.phrasing)
+    result = await founder_ws.get_usage_report(tenant, user_text=case.phrasing)
     spoken = result.get("spokenAnswer", "")
 
     stated_numbers = set(re.findall(r"\b\d+\b", spoken))
@@ -107,7 +107,7 @@ async def run_case(case: UsageGroundingCase, tenant_id: int) -> dict:
 
 async def run_all(tenant_slug: str) -> list[dict]:
     tenant = resolve_tenant(tenant_slug)
-    return [await run_case(case, tenant["id"]) for case in USAGE_GROUNDING_CASES]
+    return [await run_case(case, tenant) for case in USAGE_GROUNDING_CASES]
 
 
 def persist_results(results: list[dict], tenant_slug: str, candidate_model: str) -> str:

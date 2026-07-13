@@ -98,7 +98,7 @@ async def founder_voice_socket(websocket: WebSocket, tenant_slug: str):
             # not just that this chunk's wording is locked in.
             if is_final and msg.get("speech_final"):
                 await websocket.send_json({"type": "status", "content": "thinking"})
-                result = await route_founder_query(transcript, tenant["id"])
+                result = await route_founder_query(transcript, tenant)
                 await websocket.send_json(
                     {
                         "type": "response",

@@ -80,6 +80,11 @@ CHAT_MODEL = "mistral:7b-instruct-q8_0"  # plain conversation, no tools — alre
 
 
 def get_revenue_report(tenant: dict, **kwargs) -> dict:
+    """STILL A FIXTURE — no orders/invoices table exists in schema.sql,
+    so there is no real revenue figure to query. Do not wire this to a
+    Supabase query until that table is built; a query against
+    nonexistent order data would just be a different way of making
+    numbers up."""
     return {
         "spokenAnswer": (
             "Revenue is trending up eighteen percent week over week. "
@@ -102,6 +107,9 @@ def get_revenue_report(tenant: dict, **kwargs) -> dict:
 
 
 def get_runway_report(tenant: dict, **kwargs) -> dict:
+    """STILL A FIXTURE — runway/burn/margin need real financial data
+    (bank feed, accounting export, or at minimum an expenses table),
+    none of which exists yet. See get_revenue_report's note."""
     return {
         "spokenAnswer": "Runway is healthy. Burn within tolerance across all subsystems.",
         "overlay": {
@@ -118,6 +126,10 @@ def get_runway_report(tenant: dict, **kwargs) -> dict:
 
 
 def get_pipeline_report(tenant: dict, **kwargs) -> dict:
+    """STILL A FIXTURE — no deals/CRM table exists (tenant_tools has
+    'crm.gohighlevel' as a switchbox row, but it's disabled and nothing
+    reads from it yet). Wire this once the CRM tool is actually mounted
+    and syncing real deal data. See get_revenue_report's note."""
     return {
         "spokenAnswer": "Displaying open pipeline. Two deals flagged urgent.",
         "overlay": {
@@ -138,43 +150,111 @@ def get_pipeline_report(tenant: dict, **kwargs) -> dict:
 
 
 def get_briefing_report(tenant: dict, **kwargs) -> dict:
+    """Third real-data founder tool — synthesizes a briefing from what
+    Jarvis actually has on hand: message volume, new customers,
+    toleration timeouts, and catalog stock alerts, all scoped to this
+    tenant. No fabricated numbers.
+
+    There is deliberately no revenue/runway/pipeline data here — those
+    would need an orders/deals/CRM table that doesn't exist anywhere in
+    schema.sql yet (this tenant is a wholesale supplier with no
+    structured order data today). get_revenue_report, get_runway_report,
+    and get_pipeline_report stay fixtures below until that data source
+    is actually built — wiring them to "real" queries against tables
+    that don't exist would just be fabricating numbers a different way.
+    """
+    since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    lines: list[str] = []
+
+    try:
+        msg_count = (
+            supabase.table("messages")
+            .select("id", count="exact")
+            .eq("tenant_id", tenant["id"])
+            .gte("created_at", since_24h)
+            .execute()
+        ).count or 0
+        lines.append(f"{msg_count} message{'s' if msg_count != 1 else ''} exchanged in the last 24 hours.")
+    except Exception as err:
+        print(f"get_briefing_report messages query failed: {err}")
+
+    try:
+        new_user_count = (
+            supabase.table("users")
+            .select("id", count="exact")
+            .eq("tenant_id", tenant["id"])
+            .gte("created_at", since_24h)
+            .execute()
+        ).count or 0
+        if new_user_count:
+            lines.append(
+                f"{new_user_count} new customer{'s' if new_user_count != 1 else ''} reached out for the first time."
+            )
+    except Exception as err:
+        print(f"get_briefing_report users query failed: {err}")
+
+    try:
+        tenant_user_ids = [
+            r["id"]
+            for r in supabase.table("users").select("id").eq("tenant_id", tenant["id"]).execute().data
+        ]
+        if tenant_user_ids:
+            flagged_count = (
+                supabase.table("moderation_state")
+                .select("user_id", count="exact")
+                .in_("user_id", tenant_user_ids)
+                .gte("hard_ignore_until", datetime.now(timezone.utc).isoformat())
+                .execute()
+            ).count or 0
+            if flagged_count:
+                lines.append(
+                    f"{flagged_count} user{'s' if flagged_count != 1 else ''} currently in a toleration timeout."
+                )
+    except Exception as err:
+        print(f"get_briefing_report moderation query failed: {err}")
+
+    try:
+        collection = _get_catalog(tenant["chroma_collection"])
+        sample = collection.get(limit=200, include=["metadatas"])
+        metadatas = sample.get("metadatas") or []
+        out_ids = [m.get("product_id", "?") for m in metadatas if m.get("stock_status") == "out_of_stock"]
+        low_ids = [m.get("product_id", "?") for m in metadatas if m.get("stock_status") == "low_stock"]
+        if out_ids:
+            lines.append(f"Out of stock: {', '.join(out_ids)}.")
+        if low_ids:
+            lines.append(f"Running low: {', '.join(low_ids)}.")
+    except Exception as err:
+        print(f"get_briefing_report catalog scan failed: {err}")
+
+    if not lines:
+        lines = ["No notable activity in the last 24 hours."]
+
     return {
-        "spokenAnswer": "Compiled briefing ready. Highlights on screen.",
+        "spokenAnswer": " ".join(lines[:2]),
         "overlay": {
             "kind": "report",
             "title": "Morning Briefing",
-            "report": [
-                "// 06:00 — Uplink stable across all regions.",
-                "// 06:14 — Overnight batch jobs completed without incident.",
-                "// 07:02 — Two new leads inbound from EMEA channel.",
-                "// 07:41 — Reminder: board sync at 15:00 local.",
-                "// 08:00 — Recommend reviewing DL-412 before standup.",
-            ],
+            "report": lines,
         },
     }
 
 
-def get_usage_report(tenant: dict, **kwargs) -> dict:
-    """First real-data founder tool — everything else here is still a
-    Phase 0 fixture. Pulls actual usage_events rows for the last 7 days
-    and buckets them by day. No new schema needed; usage_events already
-    exists and has been logging since the Telegram path went live."""
+def _usage_report_data(tenant: dict) -> dict:
+    """Raw data fetch only — no English generated here. Kept separate
+    from get_usage_report() for two reasons: (1) the eval engine
+    (eval_usage_grounding.py) needs to compute the SAME ground truth
+    the production code used, without spinning up an LLM call to get
+    it; (2) it's the one place the actual numbers get produced, so
+    there's exactly one query to audit if a number is ever wrong.
+    """
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-
-    try:
-        rows = (
-            supabase.table("usage_events")
-            .select("created_at")
-            .eq("tenant_id", tenant["id"])
-            .gte("created_at", since)
-            .execute()
-        ).data
-    except Exception as err:
-        print(f"get_usage_report query failed: {err}")
-        return {
-            "spokenAnswer": "I couldn't reach the database just now. Try again in a moment.",
-            "overlay": None,
-        }
+    rows = (
+        supabase.table("usage_events")
+        .select("created_at")
+        .eq("tenant_id", tenant["id"])
+        .gte("created_at", since)
+        .execute()
+    ).data
 
     counts_by_date: dict[str, int] = {}
     for r in rows:
@@ -187,21 +267,83 @@ def get_usage_report(tenant: dict, **kwargs) -> dict:
         d = today - timedelta(days=i)
         chart.append({"label": d.strftime("%a").upper(), "value": counts_by_date.get(d.isoformat(), 0)})
 
-    total_calls = sum(c["value"] for c in chart)
-    spoken = (
-        f"You've made {total_calls} LLM calls in the last 7 days."
-        if total_calls
-        else "No LLM usage recorded in the last 7 days yet."
+    return {"total_calls": sum(c["value"] for c in chart), "chart": chart}
+
+
+async def _synthesize_grounded_answer(user_text: str, data_summary: str) -> str:
+    """The actual anti-hallucination step. The model is handed ONLY the
+    founder's question and the real numbers just pulled from the
+    database — never the freedom to explain how it computed them, only
+    to phrase what's already there. It cannot invent a number that
+    isn't in data_summary without ignoring an explicit instruction not
+    to, which is exactly what eval_usage_grounding.py checks for.
+
+    This mirrors main.py's ask_llm() catalog-grounding pattern
+    ("Answer ONLY using the catalog information below") — same
+    technique, applied to structured founder data instead of RAG text.
+    """
+    system_prompt = (
+        "You are Jarvis, a founder's assistant. Below is REAL data just "
+        "retrieved from the business's own database. Answer the "
+        "founder's question in ONE short spoken sentence, using ONLY "
+        "the numbers and facts given below. Never invent, estimate, or "
+        "round differently than what's given. If the data doesn't "
+        "actually answer the question, say so plainly instead of "
+        "guessing.\n\n"
+        f"REAL DATA:\n{data_summary}"
     )
+    try:
+        data = await _call_ollama(CHAT_MODEL, system_prompt, user_text or "How are we doing?")
+        text = (data.get("message", {}).get("content") or "").strip()
+        return text or data_summary
+    except Exception as err:
+        print(f"_synthesize_grounded_answer failed: {err}")
+        return data_summary  # fail toward showing the real numbers, never silence
+
+
+def _usage_data_summary(data: dict) -> str:
+    """The exact text handed to the LLM as 'real data' — factored out so
+    eval_usage_grounding.py can extract numbers from precisely what the
+    model was shown (including the '7' in 'last 7 days'), not just the
+    chart values. Otherwise the eval would flag a correctly-grounded
+    answer as hallucinating just for repeating the time window back."""
+    return (
+        f"Total LLM calls in the last 7 days: {data['total_calls']}. "
+        "Daily breakdown: "
+        + ", ".join(f"{c['label']}={c['value']}" for c in data["chart"])
+        + "."
+    )
+
+
+async def get_usage_report(tenant: dict, user_text: str = "", **kwargs) -> dict:
+    """First real-data founder tool — everything else here is still a
+    Phase 0 fixture. Pulls actual usage_events rows for the last 7 days,
+    buckets them by day, then hands those real numbers to the LLM to
+    phrase as a spoken answer (see _synthesize_grounded_answer). No new
+    schema needed; usage_events already exists and has been logging
+    since the Telegram path went live.
+    """
+    try:
+        data = _usage_report_data(tenant)
+    except Exception as err:
+        print(f"get_usage_report query failed: {err}")
+        return {
+            "spokenAnswer": "I couldn't reach the database just now. Try again in a moment.",
+            "overlay": None,
+        }
+
+    data_summary = _usage_data_summary(data)
+    spoken = await _synthesize_grounded_answer(user_text, data_summary)
 
     return {
         "spokenAnswer": spoken,
         "overlay": {
             "kind": "chart",
             "title": "LLM Calls · Last 7 Days",
-            "chart": chart,
+            "chart": data["chart"],
         },
     }
+
 
 
 def get_catalog_report(tenant: dict, query: str = "", **kwargs) -> dict:
@@ -404,6 +546,24 @@ async def _call_ollama(
         return resp.json()
 
 
+import asyncio
+
+
+async def invoke_tool(tool, tenant: dict, user_text: str = "", **args) -> dict:
+    """Dispatches to a FOUNDER_TOOLS entry regardless of whether it's a
+    plain sync fixture (get_revenue_report etc.) or an async, LLM-
+    grounded real-data tool (get_usage_report). Every tool receives the
+    founder's original question as user_text so a grounded tool can
+    phrase its answer around what was actually asked, not just dump a
+    fixed template. Takes the full tenant dict (id, chroma_collection,
+    tier, ...) rather than a bare tenant_id, so per-tenant Chroma lookups
+    (get_catalog_report, get_briefing_report's stock scan) work without
+    each tool re-resolving the tenant itself."""
+    if asyncio.iscoroutinefunction(tool):
+        return await tool(tenant, user_text=user_text, **args)
+    return tool(tenant, user_text=user_text, **args)
+
+
 async def route_founder_query(text: str, tenant: dict) -> dict:
     """Two-tier model routing:
       1. qwen2.5 (tool schemas attached) decides whether a founder tool
@@ -430,10 +590,12 @@ async def route_founder_query(text: str, tenant: dict) -> dict:
         call = tool_calls[0]["function"]
         name = call.get("name")
         args = call.get("arguments") or {}
+
         print(f"DEBUG tool call: name={name!r} args={args!r}")
+
         tool = FOUNDER_TOOLS.get(name)
         if tool:
-            return tool(tenant, **args)
+            return await invoke_tool(tool, tenant, user_text=text, **args)
 
     # No tool matched — general/personal question. Hand off to the
     # conversational model instead of trusting qwen's own (tool-biased)
