@@ -39,20 +39,24 @@ class UnknownTenant(Exception):
 def resolve_tenant(tenant_slug: str) -> dict:
     """Look up a tenant's row by slug.
 
-    Returns the columns every channel needs to operate correctly for
-    that tenant: id (for every FK), tier (for cloud-model gating in
-    llm_router.py), and chroma_collection (for per-tenant RAG — the
-    One Rule applies to knowledge too, see ingest.py).
+    Returns the whole tenants row: id (for every FK), tier (for
+    cloud-model gating in llm_router.py), chroma_collection (for
+    per-tenant RAG), and now also business_desc / company_profile
+    (2026-07-15, for the company meta-profile grounding fix) plus
+    any future tenant config column — selecting the full row once
+    means no caller ever breaks because a specific column was left
+    off an explicit select list here.
 
     Cached because this runs on every webhook POST / WS connect and
     tenant rows change rarely. If you edit a tenant's row (e.g. tier
-    upgrade, chroma_collection rename) and need it to take effect
-    without restarting the gateway, call resolve_tenant.cache_clear().
+    upgrade, chroma_collection rename, new company_profile) and need
+    it to take effect without restarting the gateway, call
+    resolve_tenant.cache_clear().
     """
     result = (
         get_supabase()
         .table("tenants")
-        .select("id, slug, display_name, tier, chroma_collection")
+        .select("*")
         .eq("slug", tenant_slug)
         .execute()
     )

@@ -622,9 +622,11 @@ TOOL_SYSTEM_PROMPT = (
     "small set of tools that pull real business data: revenue, runway, "
     "pipeline, a morning briefing, usage stats, and the product catalog. "
     "If the founder's question clearly matches one of these, call that "
-    "tool. If it's a general, personal, or conversational question that "
-    "no tool covers, do NOT call a tool — just don't call anything, and "
-    "a different model will handle the reply."
+    "tool. Questions about the company's own background — its address, "
+    "hours, brands, history, contact details — have NO tool; do not call "
+    "one for those. If it's a general, personal, or conversational "
+    "question that no tool covers, do NOT call a tool — just don't call "
+    "anything, and a different model will handle the reply."
 )
 
 CHAT_SYSTEM_PROMPT = (
@@ -632,6 +634,25 @@ CHAT_SYSTEM_PROMPT = (
     "directly and conversationally — this response will be spoken aloud, "
     "so keep it brief and natural, not a bulleted list."
 )
+
+
+def _chat_system_prompt(tenant: dict) -> str:
+    """Tenant-aware version of CHAT_SYSTEM_PROMPT for the no-tool
+    conversational fallback. Appends the tenant's company profile (loaded
+    into the tenants row by load_company_profile.py) so voice questions
+    like 'what's our address' or 'which brands do we carry' get grounded
+    answers instead of a generic-model guess. Falls back to the bare
+    constant when no profile is configured — behavior identical to
+    pre-2026-07-15 in that case."""
+    profile = (tenant.get("company_profile") or "").strip()
+    if not profile:
+        return CHAT_SYSTEM_PROMPT
+    return (
+        CHAT_SYSTEM_PROMPT
+        + "\n\nWhen the founder asks about the company itself, answer from "
+        "this profile and nothing else — never invent company facts:\n\n"
+        f"COMPANY PROFILE:\n{profile}"
+    )
 
 
 async def invoke_tool(tool, tenant: dict, user_text: str = "", **args) -> dict:
@@ -697,7 +718,7 @@ async def route_founder_query(text: str, tenant: dict) -> dict:
     # own (tool-biased) reply, which is often empty or oddly terse when
     # tools are attached.
     try:
-        prompt = f"{CHAT_SYSTEM_PROMPT}\n\nFounder: {text}\nJarvis:"
+        prompt = f"{_chat_system_prompt(tenant)}\n\nFounder: {text}\nJarvis:"
         spoken = await asyncio.to_thread(
             llm_router.route,
             task_type="agent_turn",

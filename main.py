@@ -300,13 +300,34 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
     catalog = get_catalog_collection(tenant["chroma_collection"])
     catalog_context = retrieve_catalog_context(catalog, user_text, tenant["id"])
 
+    # Company knowledge now comes from the tenants row (loaded there by
+    # load_company_profile.py from data/<tenant>/company_profile.md), not
+    # from a hardcoded persona string. This is the fix for "catalog tunnel
+    # vision": before 2026-07-15 the bot had ONLY catalog context, so any
+    # question about the business itself (location, hours, brands, "who
+    # are you") fell into the same check-with-the-team fallback on loop.
+    business_desc = (tenant.get("business_desc") or "").strip() \
+        or "a wholesale supplier"
+    company_profile = (tenant.get("company_profile") or "").strip() \
+        or "(no company profile configured for this tenant yet)"
+
     system_prompt = (
-        f"You are the assistant for {tenant['display_name']}, a wholesale "
-        "pipe fitting supplier. Be brief, warm, and professional. "
+        f"You are the assistant for {tenant['display_name']}, "
+        f"{business_desc}. Be brief, warm, and professional. "
         "Hindi-English mix is fine if the customer uses it.\n\n"
-        "Answer ONLY using the catalog information below. If the answer is "
-        "not in the catalog, say you'll check with the team — never invent "
-        "products, prices, or stock.\n\n"
+        "You have exactly two knowledge sources below. Use them strictly:\n"
+        "- COMPANY PROFILE: for questions about the business itself — who "
+        "we are, location, contact, hours, brands we carry, experience, "
+        "delivery area.\n"
+        "- CATALOG: for product, price, stock, and order-quantity "
+        "questions.\n\n"
+        "Never invent products, prices, stock, or company facts that are "
+        "not written below. If the answer is in neither source, say you'll "
+        "check with the team and offer the phone/WhatsApp contact from the "
+        "profile. Do not repeat the same fallback sentence twice in a row "
+        "in a conversation — vary it, or hand over the contact details "
+        "instead.\n\n"
+        f"COMPANY PROFILE:\n{company_profile}\n\n"
         f"CATALOG:\n{catalog_context}"
     )
     # providers.py's call interface is a single flat prompt string (no
