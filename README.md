@@ -54,6 +54,15 @@ exercises the REAL pipeline (retrieval + provider chain) with ground truth
 parsed live from the tenant's Chroma collection — **8/8 passing on the
 production VM**. Discipline going forward: run it after every deploy.
 
+**Status update, 2026-07-14 (evening): structured catalog truth built,
+pending deploy.** The `products` table (Supabase) is now the source of
+truth for prices/stock; the tenant's Chroma collection is a derived index
+rebuilt from it (`catalog_store.py`, rewritten `ingest.py`). Exact
+product-code and full-catalog answers read the table directly — a price
+edit in the DB reaches customers without a re-ingest. Doc format verified
+byte-identical, so `eval_customer_bot.py` needs no changes. Not yet run on
+the VM; deploy order in PROGRESS.md.
+
 ## The One Rule
 **`tenant_id` flows through everything** — every table, every Chroma collection,
 every LangGraph thread ID, every usage log row. This is the difference between a
@@ -75,6 +84,29 @@ platform and a pile of scripts.
 **Cost note:** the RunPod pod bills ~$0.44/hr while running, ~$0.017/hr while
 stopped. **Always stop it between sessions** — a several-hour idle "running"
 window is the single biggest avoidable cost in this stack.
+
+**⚠️ Run the gateway on the VM, not on the Mac.** `uvicorn main:app --reload`
+is a local-dev convenience for editing in isolation (syntax-checking a
+change, running `ingest.py`/`eval_customer_bot.py` against a scratch
+Chroma dir, etc.) — it is NOT how the live bot gets updated, and it does
+not point at production. Real customers hit the copy of `main.py` running
+as the `jarvis-gateway` systemd service on the DigitalOcean VM
+(`159.89.166.167`), fronted by nginx. To ship a change:
+
+```bash
+ssh root@159.89.166.167          # or your configured SSH alias for this VM
+cd /path/to/Jarvis_Core          # wherever this repo lives on the VM
+git pull
+sudo systemctl restart jarvis-gateway
+sudo systemctl status jarvis-gateway   # confirm it came back up clean
+curl -s https://159.89.166.167.sslip.io/health   # confirm live health
+```
+
+Running `uvicorn` on the Mac only ever talks to your local `chroma_db/`
+and whatever `.env` is on your laptop — it will look like it worked and
+still leave production on the old code. If you're not sure whether a
+step in this README or `COMMANDS.md` means "on the Mac" or "on the VM",
+assume anything that should reach real customers means the VM.
 
 ## Two frontends, one gateway
 
