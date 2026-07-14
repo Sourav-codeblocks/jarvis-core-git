@@ -42,6 +42,18 @@ wiped, not just the running instance. Unconfirmed which actually
 happened; assume a from-scratch model re-pull is needed on whatever GPU
 comes next until proven otherwise.
 
+**Status update, 2026-07-14: production healthy, 8/8 end-to-end eval passing.**
+Both LLM paths are now off RunPod for real: `main.py` (07-13) **and**
+`founder_ws.py` (07-14) route through Groq/Gemini fallback chains. Two live
+retrieval bugs found via customer screenshots and fixed the same day —
+exact product codes (KP005) now hit a deterministic metadata lookup before
+semantic search, and "show me the full catalog" pulls all rows instead of
+presenting the top-4 similarity hits as the whole catalog. Both are locked
+in as regression cases in `eval_customer_bot.py`, an end-to-end eval that
+exercises the REAL pipeline (retrieval + provider chain) with ground truth
+parsed live from the tenant's Chroma collection — **8/8 passing on the
+production VM**. Discipline going forward: run it after every deploy.
+
 ## The One Rule
 **`tenant_id` flows through everything** — every table, every Chroma collection,
 every LangGraph thread ID, every usage log row. This is the difference between a
@@ -206,23 +218,35 @@ log.
 
 ## Known gaps (see PROGRESS.md for full session detail)
 
-- **`get_catalog_report`'s similarity search unreliable** — qwen2.5 often
-  calls the tool without a search term, falling back to "show 8 generic
-  products" instead of a targeted answer. Debug logging already added to
-  `founder_ws.py` (`DEBUG tool call: ...` in the gateway logs) — check that
-  first next session before guessing at a fix.
+- ~~**`get_catalog_report`'s similarity search unreliable**~~ **FIXED
+  2026-07-14** — root cause was two-fold: embeddings can't distinguish
+  product codes (KP005 ≈ KP001 to MiniLM), and the tool schema let the
+  model send an empty query. Fix: exact-match metadata lookup
+  (`where={"product_id": ...}`) before semantic search on BOTH paths
+  (Telegram `main.py` + founder `founder_ws.py`), plus a required,
+  strongly-described `query` parameter in the tool schema.
 - **RunPod abandoned 2026-07-13** — repeated unrecoverable GPU-reclaim
   failures. Not being fixed; a new GPU provider is pending a separate
   future session. Don't spend more time troubleshooting this account.
-- **Production compute is currently broken** — `main.py`'s `OLLAMA_URL`
-  points at the abandoned RunPod pod. dslab does NOT fix this (no network
-  path from the DO VM to campus). Stays broken until the new GPU session
-  repoints `OLLAMA_URL`, or someone manually restarts RunPod (not planned).
-  **Verify actual bot status, don't assume.**
-- **Founder's Core's revenue/runway/pipeline/briefing tools are still mock
-  fixtures** — same class of fix `founder_reports.py` already solved for
-  the retired REST-based Founder's Core build. Point these at real
-  Supabase queries once there's real business data to query.
+- ~~**Production compute is currently broken**~~ **FIXED** — `main.py`
+  (07-13) and `founder_ws.py` (07-14) both route through
+  `llm_router.route()` / the Groq tool-calling chain now. No code path
+  references the dead RunPod URL anymore. Local Ollama entries in the
+  chains stay stale until the new GPU session.
+- **Founder's Core's revenue/runway/pipeline tools are still mock
+  fixtures** — there is genuinely no orders/deals/financial data to query
+  yet (no such tables exist). `get_usage_report` (2026-07-14) is the
+  template: real query → data summary → LLM phrases it, grounded, with
+  `eval_usage_grounding.py` checking no number is ever invented.
+  `get_briefing_report` is also real now (messages/users/moderation/stock).
+- **Gateway memory pressure** — 740MB peak of the 1GB cap with swap in
+  use after the embedding model loads (observed 2026-07-14). One more
+  resident model or a traffic spike risks an OOM kill. Options: bigger
+  droplet, or move embedding to a separate process/service.
+- **No order-taking flow** — the bot correctly refuses to fabricate order
+  confirmations (eval-enforced) and handles MOQ questions well, but there
+  is no actual order capture. Ships behind a HITL gate per the original
+  plan; demo framing: "coming next month."
 - **No auth on `/ws/founder/*` or `/tts/*`** — fine while the URL is
   effectively private; needs a real gate before wider exposure.
 - **Founder voice/text has no toleration middleware** — by design, per
@@ -254,6 +278,12 @@ log.
   webhook is custom FastAPI code with its own payload parsing. Plan is to
   move this to n8n (see Phase Plan below) so adding WhatsApp/Slack/etc.
   is node configuration, not new Python files.
+- **Products data lives only in Chroma text blobs** — prices/stock are
+  baked into embedded documents; a price change means re-running ingest,
+  and size/attribute queries ("1/4 inch pipe") have no structured lookup.
+  Planned fix: a `products` table in Supabase as source of truth, with
+  Chroma regenerated from it as a derived semantic index (two-path
+  retrieval: SQL for exact entities, vectors for broad questions).
 
 ## Files
 - `schema.sql` — the multi-tenant foundation (run against Postgres/Supabase)
@@ -271,6 +301,15 @@ log.
 - `schema_addition.sql` — `model_registry` + `eval_runs` DDL (already run
   against live Supabase 2026-07-13)
 - `founder_ws.py` — founder tool registry + LLM tool-calling brain (voice AND typed chat)
+- `founder_reports.py` — REST-path founder reports (real Supabase queries:
+  usage, cost, switchbox, customers)
+- `eval_customer_bot.py` — end-to-end customer bot eval: calls the REAL
+  `ask_llm()` pipeline, ground truth parsed live from Chroma, both 07-14
+  production bugs locked in as regression cases. Run after every deploy:
+  `./venv/bin/python3 eval_customer_bot.py` on the VM.
+- `eval_usage_grounding.py` — numeric-hallucination eval for the founder
+  path's grounded `get_usage_report` (any number not in the real query
+  result = fail)
 - `voice_bridge.py` — mic audio ↔ Deepgram STT bridge
 - `tts.py` — Deepgram TTS proxy
 - `founders-core/` — primary live frontend
@@ -315,3 +354,14 @@ rented GPU cluster replaces RunPod. **Bot confirmed live and replying in
 Telegram again.** `basic` tier temporarily allowed cloud (TIER_ALLOWS_CLOUD)
 since local is down — revert once local inference is back and paid-cloud
 tenants need the real gate.
+
+**Status update, 2026-07-14:** the second half of the wiring landed too —
+`founder_ws.py`'s tool-calling now walks a real fallback chain
+(`TOOL_CALL_CHAIN`, currently Groq's llama-3.3-70b via the new
+`providers.get_raw_chat_call` interface) and its text synthesis goes
+through `llm_router.route()`. Tenant resolution is enforced end-to-end
+(unknown slugs get a clean WS close, not tenant #1's data — which
+surfaced and forced the fix of the kesari/keshri slug spelling mismatch
+in the frontend, rebuilt + redeployed). Retrieval hardened (exact-match
+codes, full-catalog intent), embedding model pre-warmed at startup, and
+`eval_customer_bot.py` green at 8/8 against production.
