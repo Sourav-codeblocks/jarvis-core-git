@@ -219,6 +219,7 @@ def get_recent_history(user_id: int, limit: int = 8) -> list[dict]:
 
 import re
 
+import catalog_store
 
 FULL_CATALOG_PATTERNS = re.compile(
     r"(full|entire|complete|whole|all)\s+(product\s+)?(catalog|catalogue|list|products|items)"
@@ -230,47 +231,45 @@ FULL_CATALOG_PATTERNS = re.compile(
 MAX_FULL_CATALOG_DOCS = 50  # 15 today; cap so a future 5k-item tenant can't blow the context
 
 
-def retrieve_catalog_context(catalog, user_text: str, n_results: int = 4) -> str:
-    """Exact-match first, full-listing second, semantic last.
+def retrieve_catalog_context(catalog, user_text: str, tenant_id: int,
+                             n_results: int = 4) -> str:
+    """Exact-match first, full-listing second, semantic last — with the
+    first two now reading the `products` TABLE, not Chroma.
 
-    Semantic embeddings are near-useless for product codes: MiniLM can't
-    tell 'KP005' from 'KP001' — they're meaningless tokens to it. Observed
-    live 2026-07-14: 'Give me 5 pieces of kp005' retrieved KP001/KP012/
-    KP003/KP008 but NOT KP005, so the (correctly grounded) LLM told the
-    customer KP005 doesn't exist. Grounding worked; retrieval failed.
+    History: both deterministic paths (exact KP-code lookup, list-everything)
+    were added 2026-07-14 after two live retrieval bugs — embeddings can't
+    tell 'KP005' from 'KP001', and 'full catalog' returned top-4 similarity
+    hits as if they were everything. Same day, the pipeline inverted:
+    Supabase `products` became the structured truth and Chroma a derived
+    index (products_schema.sql / catalog_store.py). So the deterministic
+    paths now go straight to the truth — a price fixed in the table reaches
+    the customer immediately, even if the Chroma sync hasn't run yet.
+    Semantic search stays on Chroma; fuzzy matching is the one job
+    embeddings are actually for. Both paths emit the SAME document format
+    via catalog_store.product_to_document, so the LLM prompt and
+    eval_customer_bot.py's ground-truth parsing see no difference.
 
-    Same day, second retrieval bug: 'show me the full product catalog'
-    got the top-4 semantic hits presented as the complete catalog. A
-    list-everything intent now pulls ALL rows (capped) via .get() instead
-    of similarity search — there's nothing to be 'similar' to when the
-    customer wants everything.
-
-    Fix: any KP-style code in the message gets looked up directly via the
-    metadata filter (product_id was already stored by ingest.py), and
-    those exact rows are guaranteed to be in the context. Semantic search
-    then fills the remaining slots for the conversational part of the
-    question. The regex is tenant #1-shaped for now (letters+digits code
-    like KP001); generalizing the pattern per tenant belongs in tenant
-    config when tenant #2 onboards.
+    The KP-code regex is tenant #1-shaped for now (letters+digits like
+    KP001); generalizing the pattern per tenant belongs in tenant config
+    when tenant #2 onboards.
     """
     if FULL_CATALOG_PATTERNS.search(user_text):
-        everything = catalog.get(limit=MAX_FULL_CATALOG_DOCS, include=["documents"])
-        return "\n".join(everything.get("documents") or [])
+        rows = catalog_store.get_all_products(tenant_id, limit=MAX_FULL_CATALOG_DOCS)
+        return "\n".join(catalog_store.product_to_document(p) for p in rows)
 
     docs: list[str] = []
     seen: set[str] = set()
 
     codes = re.findall(r"\b([A-Za-z]{1,4}\d{2,5})\b", user_text)
-    for code in codes:
-        code_upper = code.upper()
+    if codes:
         try:
-            exact = catalog.get(where={"product_id": code_upper}, include=["documents"])
-            for doc in exact.get("documents") or []:
+            for p in catalog_store.get_products_by_codes(tenant_id, codes):
+                doc = catalog_store.product_to_document(p)
                 if doc not in seen:
                     docs.append(doc)
                     seen.add(doc)
         except Exception as err:
-            print(f"exact-match lookup failed for {code_upper} (non-fatal): {err}")
+            print(f"exact-match table lookup failed (non-fatal): {err}")
 
     remaining = max(n_results - len(docs), 0)
     if remaining:
@@ -299,7 +298,7 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
     # RAG: exact product-code hits guaranteed in context, semantic fill
     # for the rest — from THIS tenant's own collection.
     catalog = get_catalog_collection(tenant["chroma_collection"])
-    catalog_context = retrieve_catalog_context(catalog, user_text)
+    catalog_context = retrieve_catalog_context(catalog, user_text, tenant["id"])
 
     system_prompt = (
         f"You are the assistant for {tenant['display_name']}, a wholesale "
