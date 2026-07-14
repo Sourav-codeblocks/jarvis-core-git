@@ -21,6 +21,7 @@ Wiring: import this router into main.py and mount it —
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import chromadb
@@ -395,18 +396,34 @@ async def get_usage_report(tenant: dict, user_text: str = "", **kwargs) -> dict:
 
 def get_catalog_report(tenant: dict, query: str = "", **kwargs) -> dict:
     """Second real-data founder tool — searches the tenant's Chroma
-    catalog collection (see ingest.py / main.py's RAG path). If the model
-    extracted a specific product/category from the question, this runs a
-    real similarity search against it; with no query, falls back to a
-    generic sample (.get()) since there's nothing to match against.
+    catalog collection (see ingest.py / main.py's RAG path).
+
+    Exact-match first: product codes like 'KP005' are meaningless tokens
+    to the embedding model (observed live 2026-07-14: a kp005 query
+    retrieved KP001/KP012/KP003/KP008 but not KP005 on the Telegram
+    path — same weakness here). Any code-shaped token in the query gets a
+    direct metadata lookup; semantic search covers everything else. With
+    no query at all, falls back to a generic sample (.get()).
     """
     try:
         collection = _get_catalog(tenant["chroma_collection"])
+        metadatas = []
         if query.strip():
-            result = collection.query(
-                query_texts=[query], n_results=8, include=["metadatas"]
-            )
-            metadatas = result.get("metadatas", [[]])[0]
+            seen_ids: set[str] = set()
+            for code in re.findall(r"\b([A-Za-z]{1,4}\d{2,5})\b", query):
+                exact = collection.get(
+                    where={"product_id": code.upper()}, include=["metadatas"]
+                )
+                for m in exact.get("metadatas") or []:
+                    pid = m.get("product_id")
+                    if pid not in seen_ids:
+                        metadatas.append(m)
+                        seen_ids.add(pid)
+            if not metadatas:  # no code hit — plain semantic search
+                result = collection.query(
+                    query_texts=[query], n_results=8, include=["metadatas"]
+                )
+                metadatas = result.get("metadatas", [[]])[0]
         else:
             result = collection.get(limit=8, include=["metadatas"])
             metadatas = result.get("metadatas") or []
@@ -540,14 +557,19 @@ TOOLS = [
                     "query": {
                         "type": "string",
                         "description": (
-                            "The specific product, material, or category "
-                            "the founder is asking about, if any (e.g. "
-                            "'GI pipes', 'copper fittings'). Leave empty "
-                            "to show a general sample of the catalog."
+                            "REQUIRED whenever the founder mentions any "
+                            "specific product, product ID/code (e.g. "
+                            "'KP005', 'kp001'), material, size, or "
+                            "category — extract that exact term as the "
+                            "query (e.g. 'kp005', 'GI pipes', 'copper "
+                            "fittings'). Only send an empty string when "
+                            "the founder asks for a general overview of "
+                            "the whole catalog with no specific item "
+                            "mentioned."
                         ),
                     }
                 },
-                "required": [],
+                "required": ["query"],
             },
         },
     },

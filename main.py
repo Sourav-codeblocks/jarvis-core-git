@@ -121,6 +121,34 @@ def get_catalog_collection(collection_name: str):
         )
     return _catalog_collections[collection_name]
 
+
+@app.on_event("startup")
+def warm_embedding_model():
+    """Pre-load the SentenceTransformer + this deploy's tenant catalog at
+    boot, off the request path. Without this, the FIRST catalog question
+    after every gateway restart sat through the full HuggingFace model
+    load (observed live 2026-07-13: 'You are sending unauthenticated
+    requests to the HF Hub' mid-request, several seconds of dead air on
+    a founder voice query). A few extra seconds at startup instead of on
+    a user's question. Non-fatal on failure — a missing collection just
+    means the lazy path handles it later as before.
+    """
+    try:
+        tenant = resolve_tenant(TENANT_SLUG)
+        collection = get_catalog_collection(tenant["chroma_collection"])
+        collection.query(query_texts=["warmup"], n_results=1)
+        # founder_ws keeps its own Chroma client/collection cache — warm
+        # that one too so the founder path's first catalog query is also
+        # fast, not just the Telegram RAG path's.
+        import founder_ws as _fws
+        _fws._get_catalog(tenant["chroma_collection"]).query(
+            query_texts=["warmup"], n_results=1
+        )
+        print(f"Warmup complete: embedding model + '{tenant['chroma_collection']}' ready (both paths).")
+    except Exception as err:
+        print(f"Warmup skipped (non-fatal): {err}")
+
+
 @app.get("/health")
 def health():
     """Heartbeat: proves the gateway is alive AND can reach the database."""
@@ -189,6 +217,52 @@ def get_recent_history(user_id: int, limit: int = 8) -> list[dict]:
     )
     return [{"role": r["role"], "content": r["text"]} for r in reversed(rows.data)]
 
+import re
+
+
+def retrieve_catalog_context(catalog, user_text: str, n_results: int = 4) -> str:
+    """Exact-match first, semantic second.
+
+    Semantic embeddings are near-useless for product codes: MiniLM can't
+    tell 'KP005' from 'KP001' — they're meaningless tokens to it. Observed
+    live 2026-07-14: 'Give me 5 pieces of kp005' retrieved KP001/KP012/
+    KP003/KP008 but NOT KP005, so the (correctly grounded) LLM told the
+    customer KP005 doesn't exist. Grounding worked; retrieval failed.
+
+    Fix: any KP-style code in the message gets looked up directly via the
+    metadata filter (product_id was already stored by ingest.py), and
+    those exact rows are guaranteed to be in the context. Semantic search
+    then fills the remaining slots for the conversational part of the
+    question. The regex is tenant #1-shaped for now (letters+digits code
+    like KP001); generalizing the pattern per tenant belongs in tenant
+    config when tenant #2 onboards.
+    """
+    docs: list[str] = []
+    seen: set[str] = set()
+
+    codes = re.findall(r"\b([A-Za-z]{1,4}\d{2,5})\b", user_text)
+    for code in codes:
+        code_upper = code.upper()
+        try:
+            exact = catalog.get(where={"product_id": code_upper}, include=["documents"])
+            for doc in exact.get("documents") or []:
+                if doc not in seen:
+                    docs.append(doc)
+                    seen.add(doc)
+        except Exception as err:
+            print(f"exact-match lookup failed for {code_upper} (non-fatal): {err}")
+
+    remaining = max(n_results - len(docs), 0)
+    if remaining:
+        semantic = catalog.query(query_texts=[user_text], n_results=remaining)
+        for doc in semantic["documents"][0]:
+            if doc not in seen:
+                docs.append(doc)
+                seen.add(doc)
+
+    return "\n".join(docs)
+
+
 async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
     """First thought: one LLM call through the tunnel to dslab's Ollama.
 
@@ -202,11 +276,10 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
     `tenant` is the dict resolve_tenant() returns — this is what makes RAG
     and usage logging land against the right tenant instead of tenant #1.
     """
-    # RAG: retrieve the 4 most relevant catalog entries for this question,
-    # from THIS tenant's own collection — not a hardcoded global one.
+    # RAG: exact product-code hits guaranteed in context, semantic fill
+    # for the rest — from THIS tenant's own collection.
     catalog = get_catalog_collection(tenant["chroma_collection"])
-    retrieved = catalog.query(query_texts=[user_text], n_results=4)
-    catalog_context = "\n".join(retrieved["documents"][0])
+    catalog_context = retrieve_catalog_context(catalog, user_text)
 
     system_prompt = (
         f"You are the assistant for {tenant['display_name']}, a wholesale "
