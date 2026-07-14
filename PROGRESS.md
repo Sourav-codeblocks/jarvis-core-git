@@ -353,3 +353,12 @@ having been uploaded/tested against the real stack):**
 - NEXT: wire LLM to product_catalog properly + eval testing against real
   DB queries; re-certify gemini/flash-latest for agent_turn after quota
   reset; revert the two TEMP gates once local GPU cluster is up
+
+## 2026-07-14 — Session (4:00 PM – 5:10 PM)
+- KP005 retrieval bug fixed: exact-match metadata lookup before semantic search (embeddings can't distinguish product codes)
+- Full-catalog bug fixed: list-everything intent detection pulls all rows (capped 50), English + Hinglish patterns
+- Embedding model pre-warmed at gateway startup — HF cold start no longer lands on first customer question
+- eval_customer_bot.py: 8-case end-to-end eval, REAL pipeline (retrieval + Groq), ground truth parsed live from Chroma — 8/8 PASSING on production VM
+- Eval calibration lesson: category check originally failed a genuinely good broad answer; recalibrated (broad Qs deserve broad As)
+- Discipline going forward: run eval_customer_bot.py after every deploy; add every production breakage as a regression case
+- NEXT: demo script for Jul 26 (freeze features, rehearse against prod) OR products table in Supabase (structured truth for prices/stock; Chroma becomes derived index)
