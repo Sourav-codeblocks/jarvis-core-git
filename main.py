@@ -220,14 +220,30 @@ def get_recent_history(user_id: int, limit: int = 8) -> list[dict]:
 import re
 
 
+FULL_CATALOG_PATTERNS = re.compile(
+    r"(full|entire|complete|whole|all)\s+(product\s+)?(catalog|catalogue|list|products|items)"
+    r"|list\s+(all|everything)"
+    r"|(poora|pura|sara|saara)\s+(catalog|catalogue|list)",
+    re.IGNORECASE,
+)
+
+MAX_FULL_CATALOG_DOCS = 50  # 15 today; cap so a future 5k-item tenant can't blow the context
+
+
 def retrieve_catalog_context(catalog, user_text: str, n_results: int = 4) -> str:
-    """Exact-match first, semantic second.
+    """Exact-match first, full-listing second, semantic last.
 
     Semantic embeddings are near-useless for product codes: MiniLM can't
     tell 'KP005' from 'KP001' — they're meaningless tokens to it. Observed
     live 2026-07-14: 'Give me 5 pieces of kp005' retrieved KP001/KP012/
     KP003/KP008 but NOT KP005, so the (correctly grounded) LLM told the
     customer KP005 doesn't exist. Grounding worked; retrieval failed.
+
+    Same day, second retrieval bug: 'show me the full product catalog'
+    got the top-4 semantic hits presented as the complete catalog. A
+    list-everything intent now pulls ALL rows (capped) via .get() instead
+    of similarity search — there's nothing to be 'similar' to when the
+    customer wants everything.
 
     Fix: any KP-style code in the message gets looked up directly via the
     metadata filter (product_id was already stored by ingest.py), and
@@ -237,6 +253,10 @@ def retrieve_catalog_context(catalog, user_text: str, n_results: int = 4) -> str
     like KP001); generalizing the pattern per tenant belongs in tenant
     config when tenant #2 onboards.
     """
+    if FULL_CATALOG_PATTERNS.search(user_text):
+        everything = catalog.get(limit=MAX_FULL_CATALOG_DOCS, include=["documents"])
+        return "\n".join(everything.get("documents") or [])
+
     docs: list[str] = []
     seen: set[str] = set()
 
