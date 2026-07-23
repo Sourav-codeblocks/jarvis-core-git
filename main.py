@@ -15,6 +15,7 @@ from db_client import get_supabase, resolve_tenant, UnknownTenant
 from founder_ws import router as founder_router
 from voice_bridge import router as voice_router
 from tts import router as tts_router
+import owner_tools
 
 load_dotenv()  # pulls SUPABASE_URL, SUPABASE_SECRET_KEY, etc. from .env
 
@@ -282,7 +283,8 @@ def retrieve_catalog_context(catalog, user_text: str, tenant_id: int,
     return "\n".join(docs)
 
 
-async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
+async def ask_llm(user_text: str, history: list[dict], tenant: dict,
+                   effective_role: str | None = None, requester_name: str | None = None) -> str:
     """First thought: one LLM call through the tunnel to dslab's Ollama.
 
     Phase 0: direct call with a minimal per-tenant persona built from the
@@ -311,9 +313,47 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
     company_profile = (tenant.get("company_profile") or "").strip() \
         or "(no company profile configured for this tenant yet)"
 
+    if effective_role in ("admin", "founder"):
+        persona_intro = (
+            f"You're talking with {requester_name or 'the owner'}, who runs "
+            f"{tenant['display_name']}. Talk like a sharp, warm personal "
+            "assistant they'd actually enjoy talking to — not a corporate "
+            "dashboard reading out stats. Never open with a status line or "
+            "volunteer usage/cost numbers unless they actually ask for them. "
+            "You're happy to talk about anything, not just business — stay "
+            "grounded and factual only when the topic is this business "
+            "itself, using the sources below."
+        )
+    else:
+        persona_intro = (
+            f"You are the assistant for {tenant['display_name']}, "
+            f"{business_desc}. Be brief, warm, and professional."
+        )
+
+    if effective_role in ("admin", "founder"):
+        action_guardrail = (
+            "You have no ability to take a NEW action (forward, send, "
+            "dispatch) in THIS reply — that only happens through a separate "
+            "system that confirms it explicitly when it happens. Never "
+            "promise or claim a brand-new action here. BUT: if the "
+            "conversation history already shows something was forwarded, "
+            "sent, or confirmed, treat that as real and don't contradict or "
+            "deny it — just don't offer to repeat or newly perform an "
+            "action yourself."
+        )
+    else:
+        action_guardrail = (
+            "You cannot place, confirm, process, or complete an order under "
+            "any circumstance — no order-processing system is connected to "
+            "you, regardless of quantity, stock, or minimum order quantity. "
+            "Never say or imply an order was placed, confirmed, successful, "
+            "or being processed. If a customer wants to order something, "
+            "simply note what they want and give them the phone/WhatsApp "
+            "contact from the profile so the team can complete it directly."
+        )
+
     system_prompt = (
-        f"You are the assistant for {tenant['display_name']}, "
-        f"{business_desc}. Be brief, warm, and professional. "
+        f"{persona_intro} "
         "Hindi-English mix is fine if the customer uses it.\n\n"
         "You have exactly two knowledge sources below. Use them strictly:\n"
         "- COMPANY PROFILE: for questions about the business itself — who "
@@ -327,6 +367,7 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict) -> str:
         "profile. Do not repeat the same fallback sentence twice in a row "
         "in a conversation — vary it, or hand over the contact details "
         "instead.\n\n"
+        f"{action_guardrail}\n\n"
         f"COMPANY PROFILE:\n{company_profile}\n\n"
         f"CATALOG:\n{catalog_context}"
     )
@@ -391,6 +432,13 @@ async def telegram_webhook(request: Request):
     print(f"USER: {user['display_name']} (id={user['id']}, "
           f"new={is_new}, reputation={user['reputation']})")
 
+    # Owner/admin identity check — SEPARATE from the users table above.
+    # Ordinary customers never hit this finding anything; single indexed
+    # miss for the overwhelmingly common case.
+    effective_role, identity_name = owner_tools.resolve_identity_role(
+        "telegram", str(sender["id"])
+    )
+
     # First thought: route the message through the LLM, reply with its answer.
     history = get_recent_history(user["id"])
 
@@ -398,7 +446,19 @@ async def telegram_webhook(request: Request):
         "tenant_id": tenant["id"], "user_id": user["id"], "role": "user", "text": text,
     }).execute()
 
-    reply = await ask_llm(text, history, tenant)
+    reply = None
+    if effective_role in ("admin", "founder"):
+        tool_result = await owner_tools.decide_and_run_owner_tool(
+            text, tenant, requester_name=identity_name or display_name
+        )
+        if tool_result is not None:
+            reply = tool_result["result_text"]
+
+    if reply is None:
+        reply = await ask_llm(
+            text, history, tenant,
+            effective_role=effective_role, requester_name=identity_name or display_name,
+        )
 
     supabase.table("messages").insert({
         "tenant_id": tenant["id"], "user_id": user["id"], "role": "assistant", "text": reply,

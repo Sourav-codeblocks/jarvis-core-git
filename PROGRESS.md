@@ -359,3 +359,67 @@ having been uploaded/tested against the real stack):**
 - Eval calibration lesson: category check originally failed a genuinely good broad answer; recalibrated (broad Qs deserve broad As)
 - Discipline going forward: run eval_customer_bot.py after every deploy; add every production breakage as a regression case
 - NEXT: demo script for Jul 26 (freeze features, rehearse against prod) OR products table in Supabase (structured truth for prices/stock; Chroma becomes derived index)
+
+## 2026-07-23 — Session: droplet git bootstrap, order-guardrail fix, owner-role tools
+- **Tier 0 done**: droplet had NO git history at all until today. Initialized,
+  reconciled against the stale GitHub `main` (which still had the whole
+  frontend/eval-engine tree that was never actually deployed here), pushed
+  the droplet's real running state as a new branch `droplet-live`. Going
+  forward: commit after every real change, not just `cp file file.bak`.
+- **Real production bug found + fixed**: Telegram bot was confirming
+  fictional orders (tested live: "place 100 pieces of Teflon Tape" got a
+  fabricated success message with a fake total and fake follow-up promise).
+  Root cause: `main.py`'s system prompt forbade inventing facts but never
+  said it couldn't confirm an order. Fixed by adding an explicit
+  no-order-confirmation rule; later widened to cover ANY action (forward,
+  send, dispatch), not just orders, after the same failure mode showed up
+  on vendor-forwarding and festival-greeting requests (both were pure
+  narration — neither tool existed yet at the time).
+- **Full-catalog regex gap found, not yet fixed**: "pura product list dena"
+  and "pura samaan ka list do" don't match `FULL_CATALOG_PATTERNS` — the
+  regex only catches "pura" directly followed by "catalog/list," not
+  natural phrasing with words in between. Queued, not fixed tonight.
+- **Hindi TTS root cause found, not yet fixed**: `tts.py` hardcodes an
+  English-only Deepgram Aura voice (`aura-2-helena-en`). Explains "garbled
+  Hindi speech" reported on the founder voice path. Needs a Hindi-capable
+  voice or a language-aware TTS branch. Queued, not fixed tonight.
+- **RBAC discovery**: found an existing, more complete identity system
+  (`identities` + `channel_links`, admin/founder/staff roles, multi-channel
+  linking) already migrated on 2026-07-14 but never wired to any code —
+  fully dead, zero rows in `channel_links` until tonight. Decision: use
+  THIS as the real system going forward (not the `users.role` column added
+  earlier tonight, which is now superseded/unused for authorization).
+  Seeded: Sourabh = admin, Nikunj Goel = founder, both linked to real
+  Telegram chat IDs.
+- **New: `owner_tools.py`** — channel-abstraction (`send_channel_message`,
+  Telegram real/WhatsApp stubbed so a future channel swap is one function),
+  `resolve_identity_role()` (checks `channel_links`→`identities`), and the
+  first real owner tool: `forward_to_vendor()`. Deterministic result text
+  decided in code from a real delivery attempt — the LLM narrates nothing,
+  closing the same class of bug as the order-confirmation fix.
+- **New: `vendors` table** — tenant-scoped, loose category matching.
+  Seeded Sourabh as a `cement` test vendor to validate end-to-end without
+  a real vendor yet.
+- **`main.py` wired**: resolves identity on every Telegram message: if
+  admin/founder, tries the owner tool-calling layer first (Groq raw
+  tool-calling, same proven pattern as `founder_ws.py`) before falling
+  back to the normal grounded reply. Also added a role-aware persona split
+  — owners get a warm personal-assistant tone, never a "Portal active,
+  telemetry: X" dashboard voice; customers keep the existing tone.
+- **CONFIRMED LIVE, working end-to-end**: "send 550 bori of cement to
+  nagesh in kota, forward this message to vendor" → correct extraction
+  (customer, quantity, item, location) → real Telegram delivery to the
+  seeded test vendor → correct, non-hallucinated confirmation text.
+- **Known gap re-surfaced, not new**: `get_recent_history()`'s 8-message
+  window meant asking "did that work?" a few turns after a successful
+  forward got an honest-but-wrong "I don't have confirmation" — the real
+  confirmation had scrolled out of context. Same conversation-memory gap
+  already tracked; not a regression from tonight's work.
+- **Not yet tested**: `forward_to_vendor` when NO vendor exists for the
+  requested category (e.g. "steel" — nothing seeded). Should hit the
+  honest "couldn't find a vendor" path in `find_vendor()`. Worth
+  confirming before Nikunj/Gaurav use this live.
+- NEXT: test the no-vendor-found path; fix the full-catalog regex; fix
+  Hindi TTS voice; get Rajesh Bhai's real Telegram ID and seed him as the
+  real cement vendor (currently just Sourabh as test vendor); rehearse
+  demo script for Jul 26.
