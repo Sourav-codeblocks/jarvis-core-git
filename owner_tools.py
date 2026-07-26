@@ -21,12 +21,22 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
-def resolve_identity_role(channel: str, channel_user_id: str) -> tuple[str | None, str | None]:
+def resolve_identity_role(channel: str, channel_user_id: str, tenant_id: int) -> tuple[str | None, str | None]:
     """Looks up whether this channel account belongs to a known identity
-    (admin/founder/staff) via channel_links -> identities. Returns
-    (role, display_name), or (None, None) if this is just an ordinary
-    customer — which is the overwhelmingly common case, so this should
-    stay a cheap, single indexed lookup.
+    (admin/founder/staff) via channel_links -> identities, SCOPED TO THIS
+    TENANT. Returns (role, display_name), or (None, None) if this is just
+    an ordinary customer — which is the overwhelmingly common case, so
+    this should stay a cheap, single indexed lookup.
+
+    Critical: the SAME Telegram account can be an admin on one tenant and
+    a nobody-in-particular on another (e.g. Sourabh is admin for Keshri
+    Pipes but should be a plain customer on Mihika's Studio's bot). The
+    `!inner` join + tenant_id filter below is what enforces that — without
+    it, a person's identity on ANY tenant leaks into EVERY tenant they
+    happen to message, which is a real cross-tenant bug, not a cosmetic
+    one (found live 2026-07-26: Sourabh got the owner persona/tone on
+    Mihika's customer-facing bot purely because his Telegram account was
+    globally, not tenant-scoped, resolved as admin).
 
     This is deliberately SEPARATE from the users table (customer chat
     history, reputation) — identities is who's allowed to do owner-level
@@ -38,9 +48,10 @@ def resolve_identity_role(channel: str, channel_user_id: str) -> tuple[str | Non
     result = (
         get_supabase()
         .table("channel_links")
-        .select("identity_id, identities(role, display_name, status)")
+        .select("identity_id, identities!inner(role, display_name, status, tenant_id)")
         .eq("channel", channel)
         .eq("channel_user_id", channel_user_id)
+        .eq("identities.tenant_id", tenant_id)
         .execute()
     )
     if not result.data:

@@ -16,6 +16,33 @@ from founder_ws import router as founder_router
 from voice_bridge import router as voice_router
 from tts import router as tts_router
 import owner_tools
+import booking_tools
+import re
+
+BOOKING_INTENT_PATTERNS = re.compile(
+    r"\b(book|appointment|slot|available|availability|schedule|timing|reschedule|cancel)\b",
+    re.IGNORECASE,
+)
+
+def tenant_has_booking_enabled(tenant_id: int) -> bool:
+    """Cheap keyword pre-filter (see BOOKING_INTENT_PATTERNS) decides
+    WHETHER to even consider the booking tool layer; this decides
+    whether this TENANT has it switched on at all — same switchbox
+    pattern as every other tenant_tools row. Together they mean an
+    ordinary "hi" or "what's your address" message never costs an extra
+    Groq call for tenants where booking isn't even relevant."""
+    try:
+        result = (
+            supabase.table("tenant_tools")
+            .select("enabled")
+            .eq("tenant_id", tenant_id)
+            .eq("tool_key", "booking.enabled")
+            .execute()
+        )
+        return bool(result.data) and result.data[0]["enabled"]
+    except Exception as err:
+        print(f"tenant_has_booking_enabled check failed (defaulting to disabled): {err}")
+        return False
 
 load_dotenv()  # pulls SUPABASE_URL, SUPABASE_SECRET_KEY, etc. from .env
 
@@ -86,7 +113,7 @@ def _provider_shim(provider_name: str):
         return get_provider_call(provider_name, model)(prompt, timeout)
     return call
 
-CLOUD_PROVIDERS = {name: _provider_shim(name) for name in ("groq", "gemini")}
+CLOUD_PROVIDERS = {name: _provider_shim(name) for name in ("groq", "gemini", "openrouter")}
 
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -309,20 +336,25 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict,
     # question about the business itself (location, hours, brands, "who
     # are you") fell into the same check-with-the-team fallback on loop.
     business_desc = (tenant.get("business_desc") or "").strip() \
-        or "a wholesale supplier"
+        or "a local business"  # generic fallback — was hardcoded to "a wholesale
+                                # supplier" (Keshri Pipes-specific), which silently
+                                # leaked into every tenant that forgot to set this
+                                # column (found live 2026-07-26 on Mihika's Studio)
     company_profile = (tenant.get("company_profile") or "").strip() \
         or "(no company profile configured for this tenant yet)"
 
     if effective_role in ("admin", "founder"):
         persona_intro = (
             f"You're talking with {requester_name or 'the owner'}, who runs "
-            f"{tenant['display_name']}. Talk like a sharp, warm personal "
-            "assistant they'd actually enjoy talking to — not a corporate "
-            "dashboard reading out stats. Never open with a status line or "
-            "volunteer usage/cost numbers unless they actually ask for them. "
-            "You're happy to talk about anything, not just business — stay "
-            "grounded and factual only when the topic is this business "
-            "itself, using the sources below."
+            f"{tenant['display_name']}. You already know their name — use it "
+            "rarely and naturally (like a real assistant who knows someone "
+            "well), NEVER in every single reply; that reads as robotic. Talk "
+            "like a sharp, warm personal assistant they'd actually enjoy "
+            "talking to — not a corporate dashboard reading out stats. Never "
+            "open with a status line or volunteer usage/cost numbers unless "
+            "they actually ask for them. You're happy to talk about anything, "
+            "not just business — stay grounded and factual only when the "
+            "topic is this business itself, using the sources below."
         )
     else:
         persona_intro = (
@@ -352,9 +384,19 @@ async def ask_llm(user_text: str, history: list[dict], tenant: dict,
             "contact from the profile so the team can complete it directly."
         )
 
+    greeting_note = (
+        f"This is the very first message in this conversation — open your "
+        f"reply with a brief, warm greeting that names {tenant['display_name']}, "
+        "then answer what they asked. Never repeat this greeting in later "
+        "replies in the same conversation.\n\n"
+    ) if not history else ""
+
     system_prompt = (
-        f"{persona_intro} "
-        "Hindi-English mix is fine if the customer uses it.\n\n"
+        f"{persona_intro} {greeting_note}"
+        "Match the language of the CUSTOMER'S FIRST message in this "
+        "conversation — if they opened in English, reply in English; if "
+        "Hindi or Hinglish, match that. After that, flex naturally if they "
+        "switch languages mid-conversation.\n\n"
         "You have exactly two knowledge sources below. Use them strictly:\n"
         "- COMPANY PROFILE: for questions about the business itself — who "
         "we are, location, contact, hours, brands we carry, experience, "
@@ -436,7 +478,7 @@ async def telegram_webhook(request: Request):
     # Ordinary customers never hit this finding anything; single indexed
     # miss for the overwhelmingly common case.
     effective_role, identity_name = owner_tools.resolve_identity_role(
-        "telegram", str(sender["id"])
+        "telegram", str(sender["id"]), tenant["id"]
     )
 
     # First thought: route the message through the LLM, reply with its answer.
@@ -454,11 +496,41 @@ async def telegram_webhook(request: Request):
         if tool_result is not None:
             reply = tool_result["result_text"]
 
-    if reply is None:
-        reply = await ask_llm(
-            text, history, tenant,
-            effective_role=effective_role, requester_name=identity_name or display_name,
+    if reply is None and tenant_has_booking_enabled(tenant["id"]):
+        # No keyword pre-filter here on purpose (removed 2026-07-26) — a
+        # real booking request ("Haircut for tomorrow please") was
+        # silently missed by BOOKING_INTENT_PATTERNS and fell through to
+        # plain chat instead of booking. Booking-enabled tenants are
+        # low-volume small businesses; always trying the tool-decision
+        # call is worth the extra cheap Groq call to never miss a real
+        # booking intent.
+        booking_result = await booking_tools.decide_and_run_booking_tool(
+            text, tenant, user_id=user["id"], channel="telegram",
+            channel_contact=str(sender["id"]), history=history,
+            effective_role=effective_role,
         )
+        if booking_result is not None:
+            reply = booking_result["result_text"]
+
+    if reply is None:
+        try:
+            reply = await ask_llm(
+                text, history, tenant,
+                effective_role=effective_role, requester_name=identity_name or display_name,
+            )
+        except Exception as err:
+            # ALL providers failed simultaneously (found live 2026-07-26 --
+            # Groq, Gemini, AND OpenRouter free tiers all exhausted at once
+            # during a live demo). Without this, the customer got NOTHING
+            # -- a failed request, total silence -- which is worse than an
+            # honest "having trouble, here's our number" reply.
+            print(f"ask_llm failed completely (non-fatal, degrading gracefully): {err}")
+            contact = (tenant.get("company_profile") or "")
+            phone_line = "our team directly" 
+            reply = (
+                f"Sorry, I'm having trouble answering right now -- please reach "
+                f"{phone_line} and we'll help you immediately."
+            )
 
     supabase.table("messages").insert({
         "tenant_id": tenant["id"], "user_id": user["id"], "role": "assistant", "text": reply,

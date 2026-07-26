@@ -29,9 +29,11 @@ Research routing: the router decides retrieval strategy per query —
 That is a flag on the task, not a separate architecture.
 """
 
+import asyncio
 import time
 
 from db_client import get_supabase
+from providers import get_raw_chat_call, normalize_tool_response
 
 # task_type -> ordered list of (provider, model). First CERTIFIED-and-healthy wins.
 MODEL_MATRIX = {
@@ -50,12 +52,15 @@ MODEL_MATRIX = {
     # inference is reliable again -- ordering elsewhere is untouched.
     "agent_turn": [
         ("groq", "llama-3.3-70b-versatile"),   # CERTIFIED GREEN (PROGRESS.md 2026-07-13)
-        ("gemini", "gemini-flash-latest"),     # currently RED/contested -- re-certify after quota reset; harmless to leave here, router skips non-green/yellow automatically
+        ("gemini", "gemini-flash-lite-latest"),     # emergency fallback, marked yellow 2026-07-26
+        ("openrouter", "nvidia/nemotron-3-nano-30b-a3b:free"),  # THIRD emergency link, pinned
+                                                # (not the auto-router -- that leaked raw internal
+                                                # text into a real customer reply 2026-07-26)
     ],
     # Longer prose / drafting:
     "draft": [
         ("ollama_local", "mistral:7b-instruct-q8_0"),
-        ("gemini", "gemini-flash-latest"),
+        ("gemini", "gemini-flash-lite-latest"),
         ("groq", "llama-3.3-70b-versatile"),
         ("anthropic_api", "claude-sonnet-4-6"),
     ],
@@ -134,3 +139,53 @@ def route(task_type: str, prompt: str, tenant_tier: str, providers, usage_logger
     raise AllProvidersFailed(
         f"{task_type}: all certified providers failed or none certified; last: {last_err}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool-calling fallback chain — added 2026-07-26 after a REAL incident, not
+# a hypothetical one: the booking tool-calling layer had exactly ONE
+# provider hardcoded (Groq), no fallback at all. Groq hit its free-tier
+# daily token cap mid-testing and every booking silently stopped working
+# with nothing to fall back to. This is the direct fix.
+#
+# Deliberately NOT gated by model_registry certification (unlike route()
+# above) — that would need someone to run certify_model.py against
+# Gemini's tool-calling specifically first, which hasn't happened. This
+# is a simpler, hardcoded fallback chain for now; wiring it into the real
+# certification system is a legitimate future improvement, not tonight's
+# scope.
+# ---------------------------------------------------------------------------
+
+TOOL_CALL_FALLBACK_CHAIN = [
+    ("groq", "llama-3.3-70b-versatile"),
+    ("gemini", "gemini-flash-lite-latest"),
+    ("openrouter", "nvidia/nemotron-3-nano-30b-a3b:free"),  # third link, added 2026-07-26 —
+                                                             # bookings stopped entirely when
+                                                             # Groq AND Gemini were both exhausted
+                                                             # simultaneously and this chain had
+                                                             # no third option, even though the
+                                                             # plain-chat path already did
+]
+
+
+async def call_tool_with_fallback(messages: list, tools: list,
+                                   chain: list[tuple[str, str]] | None = None,
+                                   timeout: int = 20) -> dict:
+    """Tries each (provider, model) in the chain in order; returns the
+    first successful NORMALIZED response (see providers.normalize_tool_response
+    — same shared shape regardless of which provider actually answered).
+    Falls to the next provider on ANY error — rate limit, timeout,
+    network — not just a specific status code, since the failure mode
+    that actually happened (a 429) is exactly the kind of thing that
+    should trigger a fallback, not a crash."""
+    chain = chain or TOOL_CALL_FALLBACK_CHAIN
+    last_err = None
+    for provider_name, model in chain:
+        try:
+            raw = await asyncio.to_thread(get_raw_chat_call(provider_name, model), messages, tools, timeout)
+            return normalize_tool_response(provider_name, raw)
+        except Exception as err:
+            print(f"call_tool_with_fallback: {provider_name}/{model} failed, trying next: {err}")
+            last_err = err
+            continue
+    raise AllProvidersFailed(f"All tool-calling providers failed; last error: {last_err}")

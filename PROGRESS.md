@@ -423,3 +423,252 @@ having been uploaded/tested against the real stack):**
   Hindi TTS voice; get Rajesh Bhai's real Telegram ID and seed him as the
   real cement vendor (currently just Sourabh as test vendor); rehearse
   demo script for Jul 26.
+
+## 2026-07-26 — Session: Mihika's Studio onboarded, droplet resized, Docker/architecture correction
+
+**Droplet infrastructure:**
+- Resized droplet 1GB→2GB RAM, 1→2 vCPU, 25GB→60GB disk (was already
+  swapping under just Keshri Pipes alone before this — real, not
+  precautionary). `MemoryMax` on jarvis-gateway.service raised 1G→1.5G to
+  match; was capping the service at the OLD machine's ceiling even after
+  the host itself had more room.
+- Second tenant deployed as a SEPARATE folder/venv/systemd service
+  (`/opt/jarvis-core-mihika`, `jarvis-gateway-mihika.service`, port 8001)
+  — NOT a shared process. Correctly identified mid-session that "one
+  process serves every tenant" would trade file-duplication pain for
+  crash-blast-radius risk (one tenant's bug taking down every tenant's
+  bot) — wrong trade. **Real fix, not done tonight, scoped for a future
+  session: Docker.** Build the shared code once as an image, run each
+  tenant as an isolated container from it — keeps process isolation,
+  eliminates the "did I copy this fix to every folder" risk that bit us
+  twice tonight (see below).
+- nginx: added a path-based route (`/mihika/webhook/telegram` → rewritten
+  → port 8001) so both tenants' Telegram webhooks share one domain/cert.
+
+**Mihika's Studio — first real second tenant, end to end:**
+- Real business data used: Google Business listing (site itself and the
+  share.google link both block automated fetching via robots.txt) —
+  address, phone, hours (11am-8:30pm, 7 days, matches what was already
+  told), 4.8/136 reviews, real service categories. Company profile
+  written from this, paraphrased (never verbatim, copyright discipline).
+- Booking template (Layer 2, reusable for any future time-slot business):
+  `services`, `resources`, `resource_schedules`, `bookings`,
+  `premium_customers`, `booking_feedback` tables. `booking_tools.py`:
+  availability engine (validated directly against real seeded data —
+  correct slot math, correct break-time buffer exclusion, confirmed via
+  direct test scripts before ever touching a live bot), deterministic
+  (code-decided, never LLM-narrated) booking creation, artist
+  notification on successful booking (reuses `owner_tools.send_channel_message`
+  — same function that will make WhatsApp support universal later).
+- Real services replaced placeholders (Haircut/Spa/Facial/Bridal ->
+  Haircut & Styling, Hair Coloring, Threading, Waxing, Makeup x2 tiers,
+  Manicure, Pedicure, Nail Art) — durations/prices still ESTIMATED, no
+  public rate card exists; names/categories are real.
+- Premium/non-premium artist-choice split: enforced in CODE (two
+  different tool schemas — non-premium's book_appointment has no
+  resource/artist parameter AT ALL), not just prompted.
+
+**Real bugs found and fixed, in order:**
+1. Owner persona repeated the founder's name in literally every reply —
+   root cause: name injected into the system prompt every turn with no
+   "use sparingly" instruction. Fixed; then found the fix over-corrected
+   to NEVER using the name — flagged as needing real few-shot examples
+   later, not another one-line tweak (deferred deliberately).
+2. Booking-enabled tenant's `ask_llm()` crashed on ANY non-booking
+   message — assumed every tenant has a ChromaDB collection; Mihika's
+   Studio deliberately has none (too few services to need vector search).
+   Fixed: booking-enabled tenants read `services` table directly instead
+   (`booking_tools.build_services_catalog_text`).
+3. `main.py`'s hardcoded fallback business description was literally "a
+   wholesale supplier" (Keshri Pipes-specific) — leaked into Mihika's
+   identity ("We're a wholesale supplier and salon...") because
+   `tenants.business_desc` was never set for her. Fixed the immediate
+   case AND the fallback default (now generic "a local business") so the
+   next tenant that forgets this column doesn't inherit wrong industry
+   text either.
+4. **Cross-tenant identity leak, the most serious find tonight**:
+   `resolve_identity_role()` looked up a Telegram account with NO tenant
+   filter — meaning an admin identity created for Keshri Pipes was being
+   applied on Mihika's bot too, purely because it's the same person's
+   Telegram account. Fixed with a tenant-scoped `!inner` join filter.
+   Root cause of the "vague, evasive, oddly owner-toned" replies a
+   customer-role tester was getting on Mihika's bot.
+5. `check_availability`/`book_appointment` crashed the whole request on
+   any date the model phrased in words instead of YYYY-MM-DD ('today',
+   then later 'current date' — proving word-matching alone isn't enough).
+   Fixed with `_normalize_date()` for the common cases AND a real
+   try/except around tool execution so ANY malformed input degrades to
+   an honest reply instead of a 500 — the actual fix, not just patching
+   individual words.
+6. Missed booking intent: "Haircut for tomorrow please" has no keyword
+   match, silently fell through to plain chat. Fixed by removing the
+   keyword pre-filter for booking-enabled tenants entirely (always try
+   the real tool-decision call — cheap, low-volume tenants, worth it to
+   never miss a real booking).
+7. That fix's own regression: removing the keyword gate made the tool
+   fire TOO eagerly on ambiguous short questions ("Waxing?", "Hair
+   color?") and on multi-service mentions ("hair color and waxing"
+   mangled into one unmatched string). Tightened the tool-decision system
+   prompt with explicit negative examples. Improved, confirmed on the
+   compound-service case; NOT fully solved (see open item below).
+
+**Confirmed working end-to-end tonight:**
+- Vendor forwarding (Telegram, real delivery, deterministic confirmation)
+- Single-message bookings with complete info
+- Ambiguous compound-service question now gets a proper clarifying reply
+- Cross-tenant identity isolation
+
+**Known gap, NOT solved tonight — real, structural, not a quick fix:**
+Multi-turn booking narrowing ("show me times" -> "4pm" -> should book)
+is unreliable. The tool-decision model keeps re-calling
+`check_availability` instead of transitioning to `book_appointment` once
+a customer has clearly narrowed to one slot. Conversation history is now
+passed in (fixed a related bug), but inferring "what stage of the booking
+flow are we at" purely from raw history each turn is fundamentally
+fragile. Real fix likely needs explicit conversation-state tracking
+(e.g. "last shown: service X, date Y — next input is a time"), not
+another prompt tweak. Scoped as a real next task, not attempted further
+tonight given diminishing returns from live prompt iteration at this hour.
+
+**Also found tonight, unrelated to Mihika:** twice made the same mistake
+editing `booking_tools.py` via `str_replace` — old_str matched only a
+function's signature line, deleting the whole body underneath. Caught
+both times via explicit post-edit verification (checking every expected
+function name still exists via `ast.walk`), not just a syntax check —
+worth keeping that habit for any future multi-function file edit.
+
+**NEXT:**
+1. Design real conversation-state tracking for the booking flow (the
+   open item above)
+2. Docker: shared image, per-tenant containers — replaces the
+   copy-every-file-twice pattern this session exposed as fragile
+3. Confirm real service durations/prices with Mihika directly
+4. Seed Rajesh Bhai as the real cement vendor (still only Sourabh as
+   test vendor)
+5. Gaurav not yet seeded as a founder identity — no Telegram ID on file
+6. `founder_reports.py` still stale (hardcoded TENANT_ID=1) — unrelated
+   carryover from before, still unfixed
+7. Improve the "wall of comma-separated times" availability format —
+   noted as low-priority by design call, not forgotten
+
+## 2026-07-26 (continued, part 3) — Live outage during a real demo, provider quota crunch, demo tenant built
+
+Continuation of the same extended session. Parts 1 and 2 (above) cover
+the droplet resize, the booking engine build, and the first fallback
+chain. This part covers what happened once real demo traffic hit it.
+
+**Real incident: both bots went down mid-demo.** Root cause, in order:
+
+1. Groq's free-tier DAILY token cap (100,000 TPD) got fully exhausted —
+   not from malicious load, just from the sheer volume of real testing
+   plus real demo traffic in one evening. Confirmed via Groq's own error
+   body (a genuinely useful message, unlike a bare 429): exact tokens
+   used, exact retry time.
+2. Attempted Gemini as an emergency fallback (already had it certified
+   `yellow` from earlier) — Gemini's `gemini-flash-latest` free tier
+   ALSO hit its own daily cap (20 requests/day — a very small bucket)
+   at nearly the same time.
+3. Added OpenRouter as a third emergency link (`nvidia/nemotron-...
+   :free` via their free-model pool) — worked initially, but also hit
+   its own daily free-request cap under continued load.
+4. **All three real providers were simultaneously exhausted at least
+   once tonight.** This is the actual, lived proof that free-tier
+   quotas are a genuine, real constraint at even modest real usage —
+   not a hypothetical scaling concern.
+
+**Real regression, self-inflicted, worth remembering the lesson:**
+When `llm_router.py` was rewritten from scratch earlier tonight to add
+`TOOL_CALL_FALLBACK_CHAIN`, it was built from an already-stale local
+copy — which didn't have the EARLIER emergency SSH-only fix to the
+`agent_turn` chain (adding Gemini as a fallback there). Deploying the
+"new" file silently REVERTED that fix without anyone noticing, because
+it looked like a clean addition, not a regression. Cost real time to
+diagnose. **Lesson, stated plainly for next time: whenever rewriting a
+whole file from scratch instead of a targeted `str_replace`, diff it
+against what's actually live first — don't assume the rest is
+unchanged.**
+
+**Real, important safety-net fix added:** `main.py`'s final `ask_llm()`
+call had NO error handling at the top level — if every provider in the
+chain failed simultaneously (which happened live tonight), the customer
+got total silence (a failed request), not even an error message. Added
+a try/except around this specific call: on complete provider failure,
+the customer now gets a warm, honest "having trouble right now, please
+contact us directly" message instead of nothing. This is arguably the
+single most important fix of this whole session — it's the difference
+between a degraded demo and a broken one.
+
+**Real, found-live bug in the OpenRouter integration:** initially wired
+to `openrouter/free` (their auto-router, which silently picks a
+different underlying model every call). It leaked raw internal
+reasoning/safety text ("User Safety: safe") directly into a real
+customer-facing reply — different free models format output
+differently, and nothing stripped this out. Fixed by pinning to one
+specific, known model (`nvidia/nemotron-3-nano-30b-a3b:free`) instead
+of the auto-router, trading a little robustness (this exact model could
+itself get pulled from the catalog someday) for predictable, clean
+output — the right trade for a customer-facing reply.
+
+**Mitigations applied, in order, once the outage was actively hurting
+the demo:**
+1. Marked Gemini `yellow` (emergency use) via `model_registry` — no
+   restart needed, `route()` reads this table fresh every message.
+2. Discovered Groq's actual Developer/paid tier upgrade was ITSELF
+   temporarily unavailable ("due to high demand") — not something we
+   could route around, purely Groq's own outage.
+3. Checked all three providers' live status directly rather than guess
+   — found Groq had already reset on its own, and `gemini-flash-lite-
+   latest` (a DIFFERENT model, separate quota bucket from the exhausted
+   `gemini-flash-latest`) was working. Swapped to it.
+4. Both bots confirmed responding again; demo continued the next day.
+
+**Also completed tonight: the demo tenant.** Fictional "Glow Beauty
+Studio & Store" — deliberately combines BOTH templates (retail products
++ salon booking) in one tenant, since that's a realistic real-world
+pairing and lets one conversation demonstrate both capabilities. Found
+and fixed three real schema mistakes while building it (wrong column
+name `price` vs. actual `price_inr_per_unit`; wrong `stock_status`
+values — real constraint uses `in_stock`/`low_stock`/`out_of_stock`
+with underscores, not spaces — found by directly querying
+`pg_get_constraintdef` instead of guessing a third time). Validated
+directly (no bot stood up — deliberate, given the rate-limit chaos):
+both a product question and a booking request answered correctly
+against the same tenant.
+
+**New generic artifact: `booking_template_GENERIC_schema.sql`** — the
+same proven 8-table structure, fully placeholder-ized
+(`<tenant-slug>`, `<Resource 1 name>`, etc.), for any future
+appointment-based tenant. Also extended `booking_tools.build_services_
+catalog_text()` to include retail products alongside services, for any
+tenant (like the demo one) that sells both.
+
+**Known gap, real and current:** all three free-tier providers can be
+exhausted simultaneously under real, non-malicious usage in a single
+evening. The graceful-fallback safety net means this now degrades to
+"please contact us" instead of silence, but it's still a real
+availability risk worth solving properly — either a paid tier (Groq's
+Developer tier: no minimum, ~$0.59/$0.79 per million tokens for the
+70B model, likely a few dollars/month at current volume, but currently
+blocked by Groq's own signup outage) or a genuinely unlimited local
+GPU-hosted model (the ORIGINAL plan in `llm_router.py`'s own comments,
+removed only because RunPod/dslab weren't reliable — this incident is
+direct, lived proof of why that plan existed in the first place).
+
+**NEXT (updated again):**
+1. Revisit the Groq Developer tier upgrade once their signup outage
+   clears — likely the fastest, cheapest real fix for provider
+   exhaustion (estimated a few dollars/month at current volume).
+2. OR: get a reliable GPU (rented or owned) for local inference — the
+   actual unlimited, zero-rate-limit answer, deferred until now because
+   of unreliability; tonight is real evidence the deferral has a cost.
+3. Docker: shared image, per-tenant containers (still not started —
+   would ALSO have prevented tonight's stale-file-overwrite regression,
+   since a rebuilt image is explicit, not an assumed-clean local copy).
+4. `my_dance_academy` — next tenant, starting fresh next session.
+5. Everything from parts 1 and 2's NEXT lists that's still open:
+   Rajesh Bhai (real vendor), Gaurav (founder identity), Sunita Plastics
+   (blocked on real business info), `founder_reports.py` stale tenant,
+   CI/CD, real eval-engine deployment.
+6. Consider whether to stop running eval/diagnostic scripts during
+   active demo windows going forward — tonight's own testing volume was
+   part of what drove the quota exhaustion.
