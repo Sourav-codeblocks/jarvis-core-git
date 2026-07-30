@@ -90,63 +90,53 @@ def _match_words(s: str) -> list[str]:
     return [w for w in _re.findall(r"[a-z]+", s) if len(w) >= 3]
 
 
-def _resolve_service_candidates(tenant_id: int, service_name_or_id) -> list[dict]:
-    """Core matching logic, exposed so callers can tell the difference
-    between 'no match' and 'genuine tie' — e.g. 'kids dance class'
-    matching both the At Studio and At Home variants, or 'wedding
-    choreography' matching both the single- and multi-performance rows.
-    Returns [] (no match), [one match], or [2+ tied candidates].
-
-    Full-word-coverage rule: a row only counts as a candidate if EVERY
-    word in the query is found somewhere in that row's name. Partial
-    overlap is NOT enough — found live 2026-07-26 that scoring on ANY
-    shared word let "wedding dance" wrongly tie against every service
-    with "dance" in its name (Kids Dance Class, Ladies Dance & Fitness),
-    when it should match nothing at all."""
+def _get_service(tenant_id: int, service_name_or_id) -> dict | None:
     q = get_supabase().table("services").select("*").eq("tenant_id", tenant_id).eq("is_active", True)
     if isinstance(service_name_or_id, int):
-        row = (q.eq("id", service_name_or_id).execute().data or [None])[0]
-        return [row] if row else []
+        return (q.eq("id", service_name_or_id).execute().data or [None])[0]
 
     rows = q.execute().data or []
     if not rows:
-        return []
+        return None
 
     query_lower = service_name_or_id.lower().strip()
 
-    # Tier 1: full-phrase containment, either direction — still the
-    # strongest signal, handles spelling variants like 'hair colour' vs
-    # 'Hair Coloring' cleanly.
+    # Tier 1: full-phrase containment, either direction. Much stronger
+    # signal than word overlap — resolves cases where two services share
+    # one generic word (e.g. "dance") but only one contains the customer's
+    # actual phrase. Found live 2026-07-26: "wedding dance" tied on the
+    # word "dance" against an unrelated class and silently booked it.
     exact_matches = [
         row for row in rows
         if query_lower in row["name"].lower() or row["name"].lower() in query_lower
     ]
     if len(exact_matches) == 1:
-        return exact_matches
+        return exact_matches[0]
 
+    # Tier 2: word-overlap scoring (spelling variants, partial phrasing).
+    # Narrowed to tier-1 candidates if those were still ambiguous.
     candidates = exact_matches if len(exact_matches) > 1 else rows
 
-    query_words = set(_match_words(service_name_or_id))
-    if not query_words:
-        return []
+    query_words = _match_words(service_name_or_id)
+    scored = []
+    for row in candidates:
+        row_words = _match_words(row["name"])
+        score = sum(1 for qw in query_words for rw in row_words if qw in rw or rw in qw)
+        if score > 0:
+            scored.append((score, row))
 
-    full_matches = [
-        row for row in candidates
-        if all(
-            any(qw in rw or rw in qw for rw in _match_words(row["name"]))
-            for qw in query_words
-        )
-    ]
-    return full_matches
+    if not scored:
+        return None
 
+    best_score = max(s for s, _ in scored)
+    tied = [row for s, row in scored if s == best_score]
 
-def _get_service(tenant_id: int, service_name_or_id) -> dict | None:
-    """Thin wrapper kept for every existing ID-based caller (which always
-    resolves to exactly one row or none — ties are only possible on
-    free-text lookups). Returns None on a genuine tie, same fail-closed
-    behavior as before this file was split."""
-    candidates = _resolve_service_candidates(tenant_id, service_name_or_id)
-    return candidates[0] if len(candidates) == 1 else None
+    # Fail closed on a genuine tie rather than silently picking whichever
+    # row happened to be scanned first — a wrong booking is worse than an
+    # honest "couldn't find," which prompts the customer to be specific.
+    if len(tied) == 1:
+        return tied[0]
+    return None
 
 
 def build_services_catalog_text(tenant_id: int) -> str:
@@ -303,11 +293,7 @@ async def create_booking(tenant: dict, service_name: str, start_time_iso: str,
     even if that notification fails to send; the booking itself and the
     notification are two separate concerns, and a Telegram hiccup should
     never un-book someone."""
-    candidates = _resolve_service_candidates(tenant["id"], service_name)
-    if len(candidates) > 1:
-        names = "; ".join(c["name"] for c in candidates)
-        return {"success": False, "result_text": f"A couple of options match '{service_name}': {names}. Which one would you like?"}
-    service = candidates[0] if candidates else None
+    service = _get_service(tenant["id"], service_name)
     if not service:
         return {"success": False, "result_text": f"I couldn't find a service called '{service_name}'."}
 
@@ -825,14 +811,9 @@ async def decide_and_run_booking_tool(text: str, tenant: dict, user_id: int | No
 
     try:
         if name == "check_availability":
-            sname_query = args.get("service_name", "")
-            candidates = _resolve_service_candidates(tenant["id"], sname_query)
-            if len(candidates) > 1:
-                names = "; ".join(c["name"] for c in candidates)
-                return {"result_text": f"A couple of options match '{sname_query}': {names}. Which one would you like?"}
-            service = candidates[0] if candidates else None
+            service = _get_service(tenant["id"], args.get("service_name", ""))
             if not service:
-                return {"result_text": f"We don't have a service matching '{sname_query}' — want me to list what we do offer?"}
+                return {"result_text": f"We don't have a service matching '{args.get('service_name', '')}' — want me to list what we do offer?"}
             date_str = _normalize_date(args.get("date", ""))
             slots = get_available_slots(tenant["id"], args.get("service_name", ""), date_str)
             if slots and user_id is not None:
@@ -868,12 +849,7 @@ async def decide_and_run_booking_tool(text: str, tenant: dict, user_id: int | No
             cursor = datetime.fromisoformat(f"{date_str}T{args.get('time', '')}:00")
             outcomes = []
             for sname in service_names:
-                candidates = _resolve_service_candidates(tenant["id"], sname)
-                if len(candidates) > 1:
-                    names = "; ".join(c["name"] for c in candidates)
-                    outcomes.append(f"A couple of options match '{sname}': {names}. Let me know which and I'll book the rest.")
-                    continue
-                svc = candidates[0] if candidates else None
+                svc = _get_service(tenant["id"], sname)
                 if not svc:
                     outcomes.append(f"Couldn't find a service matching '{sname}' — skipped that one.")
                     continue

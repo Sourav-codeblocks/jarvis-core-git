@@ -95,14 +95,7 @@ def _resolve_service_candidates(tenant_id: int, service_name_or_id) -> list[dict
     between 'no match' and 'genuine tie' — e.g. 'kids dance class'
     matching both the At Studio and At Home variants, or 'wedding
     choreography' matching both the single- and multi-performance rows.
-    Returns [] (no match), [one match], or [2+ tied candidates].
-
-    Full-word-coverage rule: a row only counts as a candidate if EVERY
-    word in the query is found somewhere in that row's name. Partial
-    overlap is NOT enough — found live 2026-07-26 that scoring on ANY
-    shared word let "wedding dance" wrongly tie against every service
-    with "dance" in its name (Kids Dance Class, Ladies Dance & Fitness),
-    when it should match nothing at all."""
+    Returns [] (no match), [one match], or [2+ tied candidates]."""
     q = get_supabase().table("services").select("*").eq("tenant_id", tenant_id).eq("is_active", True)
     if isinstance(service_name_or_id, int):
         row = (q.eq("id", service_name_or_id).execute().data or [None])[0]
@@ -114,9 +107,11 @@ def _resolve_service_candidates(tenant_id: int, service_name_or_id) -> list[dict
 
     query_lower = service_name_or_id.lower().strip()
 
-    # Tier 1: full-phrase containment, either direction — still the
-    # strongest signal, handles spelling variants like 'hair colour' vs
-    # 'Hair Coloring' cleanly.
+    # Tier 1: full-phrase containment, either direction. Much stronger
+    # signal than word overlap — resolves cases where two services share
+    # one generic word (e.g. "dance") but only one contains the customer's
+    # actual phrase. Found live 2026-07-26: "wedding dance" tied on the
+    # word "dance" against an unrelated class and silently booked it.
     exact_matches = [
         row for row in rows
         if query_lower in row["name"].lower() or row["name"].lower() in query_lower
@@ -124,20 +119,23 @@ def _resolve_service_candidates(tenant_id: int, service_name_or_id) -> list[dict
     if len(exact_matches) == 1:
         return exact_matches
 
+    # Tier 2: word-overlap scoring (spelling variants, partial phrasing).
+    # Narrowed to tier-1 candidates if those were still ambiguous.
     candidates = exact_matches if len(exact_matches) > 1 else rows
 
-    query_words = set(_match_words(service_name_or_id))
-    if not query_words:
+    query_words = _match_words(service_name_or_id)
+    scored = []
+    for row in candidates:
+        row_words = _match_words(row["name"])
+        score = sum(1 for qw in query_words for rw in row_words if qw in rw or rw in qw)
+        if score > 0:
+            scored.append((score, row))
+
+    if not scored:
         return []
 
-    full_matches = [
-        row for row in candidates
-        if all(
-            any(qw in rw or rw in qw for rw in _match_words(row["name"]))
-            for qw in query_words
-        )
-    ]
-    return full_matches
+    best_score = max(s for s, _ in scored)
+    return [row for s, row in scored if s == best_score]
 
 
 def _get_service(tenant_id: int, service_name_or_id) -> dict | None:
