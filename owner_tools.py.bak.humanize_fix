@@ -178,8 +178,9 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
         return {
             "success": True,
             "result_text": (
-                f"We've got that — {matched_product.get('name')} at Rs {price_str} "
-                f"{unit}, {stock}. How many do you need?"
+                f"Good news, we stock that ourselves — {matched_product.get('name')}: "
+                f"Rs {price_str} {unit}, currently {stock}. Let us know the quantity "
+                "you'd like and we'll get your order moving."
             ),
         }
 

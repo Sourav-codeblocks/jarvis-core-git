@@ -124,37 +124,30 @@ def find_vendor(tenant_id: int, category: str) -> dict | None:
 
 
 
-def _find_matching_product(tenant_id: int, vendor_category: str, product_details: str) -> dict | None:
-    """Real-catalog check: does this tenant actually stock something
-    matching the requested category or product? Returns the matched
-    product ROW itself (not just True/False) so the caller can answer
-    with real price/stock instead of forwarding somewhere for an item
-    already on the shelf. Word-overlap match, same shape as the
-    dance-academy service-matching fix. On a DB error, returns None
-    (fails SAFE -- falls through to the vendor/decline path -- rather
-    than fabricating a fake product match).
+def _product_exists(tenant_id: int, vendor_category: str, product_details: str) -> bool:
+    """Real-catalog check: does this tenant actually carry something
+    matching the requested category or product? Stops forward_to_vendor
+    from firing -- and leaking an internal vendor-error message to a
+    customer -- for things not actually sold (stationery, tape, etc).
+    Word-overlap match, same shape as the dance-academy service-matching
+    fix.
     """
-    # Match against what the CUSTOMER actually asked for, not the LLM's
-    # own vendor_category label -- generic words like "supplier"/"dealer"
-    # in that label were breaking full-coverage matching against real
-    # product names (found live: "tape supplier" failed to match "Teflon
-    # Tape" because "supplier" isn't part of any product name).
     query_words = {
-        w for w in re.findall(r"[a-z]+", product_details.lower())
+        w for w in re.findall(r"[a-z]+", f"{vendor_category} {product_details}".lower())
         if len(w) > 2
     }
     try:
         products = get_all_products(tenant_id, limit=200)
     except Exception as err:
-        print(f"_find_matching_product: catalog lookup failed (non-fatal, fails safe): {err}")
-        return None
+        print(f"_product_exists: catalog lookup failed (non-fatal, fails open): {err}")
+        return True
 
     for p in products:
         cat_words = set(re.findall(r"[a-z]+", p.get("category", "").lower()))
         name_words = set(re.findall(r"[a-z]+", p.get("name", "").lower()))
-        if query_words and (query_words <= cat_words or query_words <= name_words):
-            return p
-    return None
+        if query_words & cat_words or query_words & name_words:
+            return True
+    return False
 
 
 async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: str,
@@ -167,37 +160,20 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
     night's hallucinated-forward bug: success or failure is decided here,
     in code, from a real delivery result — never guessed by the LLM.
     """
-    matched_product = _find_matching_product(tenant["id"], vendor_category, product_details)
-    if matched_product:
-        price = matched_product.get("price_inr_per_unit")
-        price_str = f"{price:g}" if isinstance(price, (int, float)) else str(price)
-        if price_str.endswith(".00"):
-            price_str = price_str[:-3]
-        stock = str(matched_product.get("stock_status", "")).replace("_", " ")
-        unit = matched_product.get("unit", "")
-        return {
-            "success": True,
-            "result_text": (
-                f"We've got that — {matched_product.get('name')} at Rs {price_str} "
-                f"{unit}, {stock}. How many do you need?"
-            ),
-        }
-
     vendor = find_vendor(tenant["id"], vendor_category)
 
     if not vendor:
+        is_real_product = _product_exists(tenant["id"], vendor_category, product_details)
         print(
             f"[vendor-gap] tenant={tenant['id']} category='{vendor_category}' "
-            f"product='{product_details}' -- not in our catalog, no active vendor "
-            "row matched either; customer got a generic decline."
+            f"product='{product_details}' in_catalog={is_real_product} -- "
+            "no active vendor row matched; customer got a generic decline."
         )
         return {
             "success": False,
             "result_text": (
-                f"We don't currently carry that, sorry! "
-                f"{tenant['display_name']} specializes in pipes, fittings, "
-                "valves, and related consumables — happy to help if you're "
-                "looking for something from that range."
+                f"Thanks for reaching out — let me check on that with the "
+                f"{tenant['display_name']} team and get back to you shortly!"
             ),
         }
 
@@ -216,11 +192,7 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
     if sent:
         return {
             "success": True,
-            "result_text": (
-                f"We don't stock that ourselves, but I've forwarded your "
-                f"request to our {vendor_category} supplier — they'll be in "
-                "touch with you shortly."
-            ),
+            "result_text": f"Sent to {vendor['name']} on {vendor['channel']}. They'll have it now.",
         }
     return {
         "success": False,

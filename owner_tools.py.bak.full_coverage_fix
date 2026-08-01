@@ -134,13 +134,8 @@ def _find_matching_product(tenant_id: int, vendor_category: str, product_details
     (fails SAFE -- falls through to the vendor/decline path -- rather
     than fabricating a fake product match).
     """
-    # Match against what the CUSTOMER actually asked for, not the LLM's
-    # own vendor_category label -- generic words like "supplier"/"dealer"
-    # in that label were breaking full-coverage matching against real
-    # product names (found live: "tape supplier" failed to match "Teflon
-    # Tape" because "supplier" isn't part of any product name).
     query_words = {
-        w for w in re.findall(r"[a-z]+", product_details.lower())
+        w for w in re.findall(r"[a-z]+", f"{vendor_category} {product_details}".lower())
         if len(w) > 2
     }
     try:
@@ -152,7 +147,7 @@ def _find_matching_product(tenant_id: int, vendor_category: str, product_details
     for p in products:
         cat_words = set(re.findall(r"[a-z]+", p.get("category", "").lower()))
         name_words = set(re.findall(r"[a-z]+", p.get("name", "").lower()))
-        if query_words and (query_words <= cat_words or query_words <= name_words):
+        if query_words & cat_words or query_words & name_words:
             return p
     return None
 
@@ -178,8 +173,9 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
         return {
             "success": True,
             "result_text": (
-                f"We've got that — {matched_product.get('name')} at Rs {price_str} "
-                f"{unit}, {stock}. How many do you need?"
+                f"Good news, we stock that ourselves — {matched_product.get('name')}: "
+                f"Rs {price_str} {unit}, currently {stock}. Let us know the quantity "
+                "you'd like and we'll get your order moving."
             ),
         }
 
@@ -194,10 +190,8 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
         return {
             "success": False,
             "result_text": (
-                f"We don't currently carry that, sorry! "
-                f"{tenant['display_name']} specializes in pipes, fittings, "
-                "valves, and related consumables — happy to help if you're "
-                "looking for something from that range."
+                f"Thanks for reaching out — let me check on that with the "
+                f"{tenant['display_name']} team and get back to you shortly!"
             ),
         }
 
@@ -216,11 +210,7 @@ async def forward_to_vendor(tenant: dict, requester_name: str, vendor_category: 
     if sent:
         return {
             "success": True,
-            "result_text": (
-                f"We don't stock that ourselves, but I've forwarded your "
-                f"request to our {vendor_category} supplier — they'll be in "
-                "touch with you shortly."
-            ),
+            "result_text": f"Sent to {vendor['name']} on {vendor['channel']}. They'll have it now.",
         }
     return {
         "success": False,
