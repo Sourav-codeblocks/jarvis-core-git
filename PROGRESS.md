@@ -672,3 +672,45 @@ direct, lived proof of why that plan existed in the first place).
 6. Consider whether to stop running eval/diagnostic scripts during
    active demo windows going forward — tonight's own testing volume was
    part of what drove the quota exhaustion.
+## 2026-08-01 — Session (evening, ~4 hours)
+
+- Baseline git snapshot completed for all three tenant folders (Keshri
+  Pipes, Mihika's Studio, My Dance Academy) — Dance Academy git-init'd
+  for the first time, `.env`/`venv`/`chroma_db` correctly gitignored
+  everywhere, no secrets committed
+- Bug A (hardcoded "haircut" example in shared `_system_prompt()`)
+  diagnosed as a copy-paste bug, NOT a cross-tenant leak — fixed and
+  deployed across all three tenants
+- NEW bug found live (not on any prior plan): vendor-forwarding was
+  either falsely denying real catalog items or falsely claiming a
+  forward happened when it hadn't, and leaking internal founder-facing
+  text to customers. Fully diagnosed and fixed through several iterations
+  (catalog-vs-vendor-vs-decline three-way split, full-word-coverage
+  matching, matching on customer's actual words not the LLM's invented
+  vendor-category label, clean customer-facing copy) — confirmed working
+  end to end via live Telegram tests
+- Company profile (`company_profile.md`) updated to direct full-catalog
+  requests to the real website (https://keshripipes.com) instead of the
+  model improvising a fallback — reloaded into Supabase, confirmed live
+  after a gateway restart (discovered: `load_company_profile.py` does
+  NOT auto-clear `resolve_tenant()`'s cache, a restart is required)
+- NEW FEATURE shipped: payment follow-up reminders for Keshri Pipes.
+  New `payment_followups` table, new `payment_tools.py` (owner-triggered
+  send + customer-reply classification: DELAYED/READY/OTHER), hooked
+  into `telegram_webhook`, state-gated so it can never touch a customer
+  who wasn't actually sent a reminder. DELAYED path tested live and
+  confirmed correct end to end (DB state + Telegram round-trip). READY
+  path and 3rd-follow-up escalation are written and deployed but NOT
+  yet live-tested — do that first next session.
+- Founder decision: Docker + CI/CD is now the top priority for next
+  session, ahead of any new tenant work — tonight reconfirmed the risk
+  (a single missing `import re` briefly broke live order-forwarding
+  mid-fix; several other near-misses from manual SSH patching)
+- Founder decision: NXT Landspaces (tenant #5, real estate) is parked
+  for now — do not start scaffolding without being asked
+- All commits pushed to `origin/droplet-live` on GitHub (was 4 commits
+  behind at session start, caught up by end)
+- NEXT: test payment-followup READY + escalation paths, then Docker/CI-CD
+  design discussion, then Bug B (My Dance Academy dateless "11am" loop —
+  still not diagnosed across three sessions now), then `/opt/jarvis-frontend`
+  investigation
