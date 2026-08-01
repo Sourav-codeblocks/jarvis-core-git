@@ -768,7 +768,7 @@ async def decide_and_run_booking_tool(text: str, tenant: dict, user_id: int | No
 
     history: recent prior turns (same shape as main.py's get_recent_history
     output), included so multi-turn flows resolve correctly — e.g.
-    "show me haircut times tomorrow" -> "book it" needs the service/date
+    "show me appointment times tomorrow" -> "book it" needs the service/date
     from the PRIOR turn, which the model can't infer from "book it" alone.
     Found missing live 2026-07-26 (a real booking request silently fell
     through to plain chat instead of firing the tool)."""
