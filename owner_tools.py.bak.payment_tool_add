@@ -273,35 +273,15 @@ OWNER_TOOLS_SCHEMA = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_payment_reminder",
-            "description": (
-                "Send a payment reminder to a customer with a pending "
-                "invoice. Only call this when the owner CLEARLY asks to "
-                "send/follow up on a payment or invoice for a named "
-                "customer -- not for ordinary catalog or vendor requests."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "customer_name": {"type": "string", "description": "Customer's name as the owner referred to them"},
-                    "invoice_no": {"type": "string", "description": "Invoice number, omit if not mentioned"},
-                },
-                "required": ["customer_name"],
-            },
-        },
-    },
 ]
 
 OWNER_TOOL_SYSTEM_PROMPT = (
     "You are helping the owner of this business manage requests. You have "
-    "two tools available: forwarding a requirement to a vendor, and "
-    "sending a payment reminder to a customer. Only call a tool when the "
-    "owner CLEARLY means one of these two things — for anything else "
-    "(catalog questions, casual conversation, anything you don't have a "
-    "tool for), do NOT call a tool; a different response path handles that."
+    "one tool available: forwarding a requirement to a vendor. Only call "
+    "it when they clearly mean 'forward/send/pass this to X' — for "
+    "anything else (catalog questions, casual conversation, anything you "
+    "don't have a tool for), do NOT call a tool; a different response "
+    "path handles that."
 )
 
 
@@ -349,9 +329,5 @@ async def decide_and_run_owner_tool(text: str, tenant: dict, requester_name: str
 
     if name == "forward_to_vendor":
         return await forward_to_vendor(tenant, requester_name=requester_name, **args)
-
-    if name == "send_payment_reminder":
-        from payment_tools import send_payment_reminder
-        return await send_payment_reminder(tenant, **args)
 
     return None

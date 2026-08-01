@@ -16,7 +16,6 @@ from founder_ws import router as founder_router
 from voice_bridge import router as voice_router
 from tts import router as tts_router
 import owner_tools
-import payment_tools
 import booking_tools
 import re
 
@@ -490,21 +489,7 @@ async def telegram_webhook(request: Request):
     }).execute()
 
     reply = None
-
-    # Payment-followup reply check -- runs for EVERY sender, not just
-    # admins, since customers are who reply to reminders. Gated entirely
-    # on STATE (does this exact sender have an open reminder_sent row?),
-    # not on message content -- a true no-op for anyone who was never
-    # sent a reminder, so this can never affect a normal order/catalog
-    # conversation. See payment_tools.py's decide_and_run_payment_reply
-    # docstring for the full reasoning.
-    payment_result = await payment_tools.decide_and_run_payment_reply(
-        text, tenant, channel="telegram", channel_contact=str(sender["id"]),
-    )
-    if payment_result is not None:
-        reply = payment_result["result_text"]
-
-    if reply is None and effective_role in ("admin", "founder"):
+    if effective_role in ("admin", "founder"):
         tool_result = await owner_tools.decide_and_run_owner_tool(
             text, tenant, requester_name=identity_name or display_name
         )

@@ -1,0 +1,211 @@
+"""Jarvis Core — Payment follow-up tools (Keshri Pipes, tenant-scoped for now).
+
+Two halves:
+  1. Owner-triggered: send a reminder for a customer's pending invoice.
+     Same shape as owner_tools.py's forward_to_vendor -- code decides
+     success/failure from a real send result, never the LLM.
+  2. Customer-reply handling: when a customer with an open `reminder_sent`
+     row replies, classify DELAYED / READY / OTHER and update state.
+     Reply COPY is fixed, human-reviewed text -- the LLM only ever picks
+     a category, never drafts what gets sent, same principle as
+     forward_to_vendor's result_text.
+
+Gate for who even reaches the classifier: only channel_contacts with an
+OPEN `reminder_sent` row for this tenant -- a STATE check, not a keyword
+check. "I can't pay today" said while placing a fresh order must never
+touch payment_followups; the only reliable signal that a message is
+actually a reply to OUR reminder is that we ourselves just sent one and
+haven't yet resolved their reply (status hasn't moved off reminder_sent).
+"""
+
+from datetime import date, timedelta
+
+from db_client import get_supabase
+from providers import get_raw_chat_call, normalize_tool_response
+
+PAYMENT_TOOL_CHAIN = [("groq", "llama-3.3-70b-versatile")]
+
+REMINDER_TEMPLATE = (
+    "Hi {name}, just a quick note from {business} — invoice #{invoice_no} for "
+    "Rs {amount} was due on {due_date}. No rush if you need a little more "
+    "time, just let us know where things stand. Thanks!"
+)
+
+REPLY_DELAYED = (
+    "Totally understand, thanks for telling us. We'll check back with you "
+    "in a bit — no pressure. Reach out anytime if you need anything from "
+    "us in the meantime."
+)
+
+REPLY_DELAYED_ESCALATED = (
+    "Thanks for keeping us posted — we really do appreciate it. Since "
+    "it's been a little while now, could you give us a date we can count "
+    "on? Would {suggested_date} work for you? Just helps us plan on our end."
+)
+
+REPLY_READY = (
+    "That's great to hear, thank you! Someone from our team will reach "
+    "out shortly to sort out the details. Feel free to contact us "
+    "directly if anything comes up before then."
+)
+
+
+def _fmt_amount(amount) -> str:
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return str(amount)
+    s = f"{amount:,.2f}"
+    return s[:-3] if s.endswith(".00") else s
+
+
+def _find_followup(tenant_id: int, customer_name: str, invoice_no: str = ""):
+    """Loose name match, same shape as owner_tools.find_vendor -- case-
+    insensitive substring, optionally narrowed by invoice_no. Only looks
+    at rows that are still actionable (not already paid/cancelled)."""
+    sb = get_supabase()
+    rows = (
+        sb.table("payment_followups").select("*")
+        .eq("tenant_id", tenant_id)
+        .not_.in_("status", ["paid", "cancelled"])
+        .execute()
+    ).data or []
+
+    name_lower = customer_name.lower().strip()
+    candidates = [r for r in rows if name_lower in r["customer_name"].lower()]
+    if invoice_no:
+        narrowed = [r for r in candidates if invoice_no.lower() in (r.get("invoice_no") or "").lower()]
+        if narrowed:
+            candidates = narrowed
+
+    if not candidates:
+        return None, []
+    if len(candidates) == 1:
+        return candidates[0], []
+    return None, candidates  # ambiguous -- caller decides what to do
+
+
+async def send_payment_reminder(tenant: dict, customer_name: str, invoice_no: str = "", **kwargs) -> dict:
+    """Owner-triggered: 'send payment reminder to X'."""
+    row, ambiguous = _find_followup(tenant["id"], customer_name, invoice_no)
+
+    if ambiguous:
+        names = "; ".join(f"{r['customer_name']} (invoice {r.get('invoice_no') or '—'})" for r in ambiguous)
+        return {"success": False, "result_text": f"Found more than one match: {names}. Which one did you mean?"}
+
+    if not row:
+        return {"success": False, "result_text": f"No pending payment follow-up found for '{customer_name}'."}
+
+    from owner_tools import send_channel_message  # reuse the one real sender
+
+    text = REMINDER_TEMPLATE.format(
+        name=row["customer_name"], business=tenant["display_name"],
+        invoice_no=row.get("invoice_no") or "your order",
+        amount=_fmt_amount(row["amount_due"]),
+        due_date=row.get("due_date") or "the due date",
+    )
+    sent = await send_channel_message(row["channel"], row["channel_contact"], text)
+    if not sent:
+        return {"success": False, "result_text": f"Couldn't reach {row['customer_name']} — message didn't go through."}
+
+    get_supabase().table("payment_followups").update({
+        "status": "reminder_sent",
+        "follow_up_count": row["follow_up_count"] + 1,
+        "last_reminder_sent_at": "now()",
+    }).eq("id", row["id"]).execute()
+
+    return {"success": True, "result_text": f"Reminder sent to {row['customer_name']} (invoice {row.get('invoice_no') or '—'})."}
+
+
+async def _classify_payment_reply(text: str) -> str:
+    """DELAYED | READY | OTHER. Deliberately narrow: only decides the
+    CATEGORY, never drafts the reply -- copy is fixed, defined above."""
+    provider, model = PAYMENT_TOOL_CHAIN[0]
+    call = get_raw_chat_call(provider, model)
+    messages = [
+        {"role": "system", "content": (
+            "Classify the customer's reply to a payment reminder into exactly "
+            "one word: DELAYED (can't pay now / needs more time / will pay "
+            "later), READY (ready to pay now / wants to arrange payment or "
+            "collection), or OTHER (unrelated to this payment, unclear, or a "
+            "question). Reply with exactly one of those three words, nothing else."
+        )},
+        {"role": "user", "content": text},
+    ]
+    raw = await call(messages=messages, tools=[], timeout=15)
+    normalized = normalize_tool_response(provider, raw)
+    content = (normalized.get("content") or "").strip().upper()
+    if "READY" in content:
+        return "READY"
+    if "DELAYED" in content:
+        return "DELAYED"
+    return "OTHER"
+
+
+async def _alert_founders(tenant: dict, row: dict, customer_text: str) -> None:
+    from owner_tools import send_channel_message
+    sb = get_supabase()
+    admins = (
+        sb.table("identities").select("id")
+        .eq("tenant_id", tenant["id"]).eq("status", "verified")
+        .in_("role", ["admin", "founder"])
+        .execute()
+    ).data or []
+    if not admins:
+        return
+    links = (
+        sb.table("channel_links").select("channel, channel_user_id")
+        .in_("identity_id", [a["id"] for a in admins])
+        .execute()
+    ).data or []
+
+    alert = (
+        f"Payment follow-up: {row['customer_name']} (invoice {row.get('invoice_no') or '—'}, "
+        f"Rs {_fmt_amount(row['amount_due'])}) just replied: \"{customer_text}\" — "
+        "sounds ready to pay. Please follow up directly."
+    )
+    for link in links:
+        await send_channel_message(link["channel"], link["channel_user_id"], alert)
+
+
+async def decide_and_run_payment_reply(text: str, tenant: dict, channel: str, channel_contact: str) -> dict | None:
+    """Returns None if the gate is closed (no open reminder for this
+    sender) or the reply is ambiguous -- caller falls through to normal
+    chat untouched, exactly like booking_tools' decide_and_run pattern."""
+    sb = get_supabase()
+    rows = (
+        sb.table("payment_followups").select("*")
+        .eq("tenant_id", tenant["id"]).eq("channel", channel)
+        .eq("channel_contact", channel_contact).eq("status", "reminder_sent")
+        .order("updated_at", desc=True).limit(1)
+        .execute()
+    ).data
+    if not rows:
+        return None
+    row = rows[0]
+
+    category = await _classify_payment_reply(text)
+    if category == "OTHER":
+        return None  # don't touch state; let normal flow handle it
+
+    if category == "READY":
+        sb.table("payment_followups").update({
+            "status": "agent_action_required",
+            "notes": ((row.get("notes") or "") + f"\n[ready to pay] {text}").strip(),
+        }).eq("id", row["id"]).execute()
+        await _alert_founders(tenant, row, text)
+        return {"success": True, "result_text": REPLY_READY}
+
+    # DELAYED
+    if row["follow_up_count"] >= 3:
+        suggested = (date.today() + timedelta(days=3)).strftime("%d %b")
+        reply_text = REPLY_DELAYED_ESCALATED.format(suggested_date=suggested)
+    else:
+        reply_text = REPLY_DELAYED
+
+    sb.table("payment_followups").update({
+        "status": "delayed_promised",
+        "notes": ((row.get("notes") or "") + f"\n[delayed] {text}").strip(),
+    }).eq("id", row["id"]).execute()
+
+    return {"success": True, "result_text": reply_text}
