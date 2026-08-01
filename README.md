@@ -1,399 +1,150 @@
-# Jarvis Core — Phase 0 → Live Deployment
+# Jarvis Core — Multi-Tenant Agentic Platform
 
-This folder is the foundation of the multi-tenant agentic platform. It encodes the
-architectural decisions that must be right on day one, so tenants 2–10 become
-config rows instead of rewrites.
+This is the foundation of a multi-tenant platform where each small
+business ("tenant") gets a Telegram (soon WhatsApp) chatbot answering
+customers grounded in their own real data — never hallucinated. Adding a
+tenant is meant to be config + data, never code.
 
-**Status as of 2026-07-10: live in production for one tenant (Kesari Pipes).**
-Telegram text and Founder's Core voice are both deployed, unattended, on a
-real VM + GPU pod. See `PROGRESS.md` for the session-by-session log and
-`WORKING.md` for the voice pipeline's exact wiring.
+**Status as of 2026-08-01**: three tenants live on Telegram (Keshri
+Pipes, Mihika's Studio, My Dance Academy), each in its own folder/port/
+systemd service on one DigitalOcean droplet. See `ARCHITECTURE.md` for
+the current map (rewritten each session, short by design) and
+`PROGRESS.md` for the full dated history — this file gives orientation
+and the reference tables; it no longer tries to be a second running log.
+A detailed dated narrative of the RunPod era, the eval engine build, and
+the 2026-07 provider-fallback work still lives further down for
+historical context, but treat `ARCHITECTURE.md` as more current for
+anything about what's actually running today.
 
-**Status update, 2026-07-13:** **RunPod terminated.** Bot confirmed down
-(direct message test, no reply) — production has been down, not just
-degraded, and is staying down on purpose until the real fix, not a patch.
+## ⚠️ Next major change: Docker + CI/CD (not started)
 
-**The real fix, decided today:** production going down because one
-compute provider disappeared means the gateway has zero resilience right
-now. The fix isn't another single GPU — it's `main.py` and `founder_ws.py`
-finally calling `llm_router.route()` for real (both currently bypass it
-and hit Ollama directly — flagged since the first code review, urgent
-now), with a `MODEL_MATRIX` that includes at least one free cloud
-fallback (Groq — already confirmed working as an eval judge). Model
-evaluation and acquisition is not a side project anymore; it's the
-production reliability work. See PROGRESS.md 2026-07-13 for the full
-decision log.
-
-**Fix progress, same day (2026-07-13 evening session):** the fallback
-half is built and certified. `llm_router.py` now carries free-cloud
-chains (ollama → gemini → groq → openrouter → anthropic) **and a
-certification gate**: it refuses to route to any (provider, model, task)
-triple not marked green in the new `model_registry` table. First green
-labels earned tonight — `gemini/gemini-flash-lite-latest` for intent
-(100% accuracy) and `groq/llama-3.3-70b-versatile` for agent_turn
-(tool-call format verified, 336ms). **What is still NOT done:** `main.py`
-and `founder_ws.py` still bypass the router — the wiring step is the
-remaining half of the production fix, so the bot is still down until
-that lands.
-
-**Note on "terminated":** if this was a true RunPod Terminate (not Stop),
-the pod's persistent volume — including the three pre-pulled models — is
-wiped, not just the running instance. Unconfirmed which actually
-happened; assume a from-scratch model re-pull is needed on whatever GPU
-comes next until proven otherwise.
-
-**Status update, 2026-07-14: production healthy, 8/8 end-to-end eval passing.**
-Both LLM paths are now off RunPod for real: `main.py` (07-13) **and**
-`founder_ws.py` (07-14) route through Groq/Gemini fallback chains. Two live
-retrieval bugs found via customer screenshots and fixed the same day —
-exact product codes (KP005) now hit a deterministic metadata lookup before
-semantic search, and "show me the full catalog" pulls all rows instead of
-presenting the top-4 similarity hits as the whole catalog. Both are locked
-in as regression cases in `eval_customer_bot.py`, an end-to-end eval that
-exercises the REAL pipeline (retrieval + provider chain) with ground truth
-parsed live from the tenant's Chroma collection — **8/8 passing on the
-production VM**. Discipline going forward: run it after every deploy.
-
-**Status update, 2026-07-14 (evening): structured catalog truth built,
-pending deploy.** The `products` table (Supabase) is now the source of
-truth for prices/stock; the tenant's Chroma collection is a derived index
-rebuilt from it (`catalog_store.py`, rewritten `ingest.py`). Exact
-product-code and full-catalog answers read the table directly — a price
-edit in the DB reaches customers without a re-ingest. Doc format verified
-byte-identical, so `eval_customer_bot.py` needs no changes. Not yet run on
-the VM; deploy order in PROGRESS.md.
+Founder decision, 2026-08-01: this is the top priority for the next
+session. Current deployment (below) is four separate folders on one
+droplet, kept in sync by hand — a real, repeatedly-confirmed source of
+fragility (a missing `import re` briefly broke live order-forwarding
+mid-session tonight; several other close calls came from manual SSH
+patching). Don't assume the folder-per-tenant/systemd model described
+below is permanent — it's the current reality, expected to change soon.
 
 ## The One Rule
-**`tenant_id` flows through everything** — every table, every Chroma collection,
-every LangGraph thread ID, every usage log row. This is the difference between a
+**`tenant_id` flows through everything** — every table, every Chroma
+collection, every usage log row. This is the difference between a
 platform and a pile of scripts.
 
-## Live infrastructure
+## Live infrastructure (current, 2026-08-01)
 
 | Piece | Where | Notes |
 |---|---|---|
-| Gateway (`main.py`) | DigitalOcean VM, `159.89.166.167`, systemd (`jarvis-gateway`) | Bangalore region. Survives reboots/crashes. |
-| Founder's Core frontend | Same VM, systemd (`jarvis-frontend`), port 3000 | Real voice pipeline. Primary UI going forward. |
-| Domain | `159.89.166.167.sslip.io` | Free magic-DNS, real Let's Encrypt HTTPS. Swap for a real domain later — one certbot re-run, no code changes. |
-| Reverse proxy | nginx on the VM | Routes `/webhook`, `/health`, `/api/founder/*`, `/ws/founder/*`, `/tts/*` → gateway (:8000); everything else → frontend (:3000). |
-| LLM compute | ~~RunPod, pod `xl0rixu7dkzh1b`~~ **TERMINATED 2026-07-13** — bot confirmed down, not a patch job. If this was a true Terminate (not Stop), the persistent volume + pre-pulled models are gone too, unconfirmed. Real fix: route production through `llm_router.py` with a free-cloud fallback (Groq), not another single GPU. | Was 1x A40 (48GB VRAM), on-demand, NOT serverless. |
-| Models on RunPod | `llama3.2:3b-instruct-q8_0`, `qwen2.5:7b-instruct-q8_0`, `mistral:7b-instruct-q8_0` | On the pod's persistent volume disk — survive stop/start, wiped only on Terminate. Same weights also used as eval candidates via the dslab tunnel — see Eval Engine section. |
-| Database | Supabase (Mumbai region) | Unchanged from Phase 0. Also now holds `llm_evaluations` and `model_catalog` (eval engine, added 2026-07-12/13). |
-| Voice STT/TTS | Deepgram (nova-3 STT, Aura-2 TTS) | Proxied through the gateway — browser never holds the API key. |
+| Keshri Pipes gateway | `/opt/jarvis-core`, port 8000, `jarvis-gateway.service` | Original tenant, catalog template, has payment follow-ups (new) |
+| Mihika's Studio gateway | `/opt/jarvis-core-mihika`, port 8001, `jarvis-gateway-mihika.service` | Booking template |
+| My Dance Academy gateway | `/opt/jarvis-core-dance`, port 8002, `jarvis-gateway-dance.service` | Booking template |
+| Frontend | `/opt/jarvis-frontend`, port 3000, `jarvis-frontend.service` | **Unverified** — see open discrepancy note in `ARCHITECTURE.md` (may or may not be the same thing as `founders-core/` described later in this file) |
+| Droplet | `159.89.166.167`, 2GB RAM / 2vCPU / 60GB disk | DigitalOcean |
+| Database | Supabase (Mumbai region) | All tenant data, `payment_followups` added 2026-08-01 |
+| Reverse proxy | nginx on the droplet | Routes each tenant's `/webhook/telegram` path to its own port |
+| LLM providers | Groq (primary), Gemini, OpenRouter (fallback chain) | See Model Routing below — **[unverified this pass]**, confirm current chain in `llm_router.py` directly before relying on this table |
 
-**Cost note:** the RunPod pod bills ~$0.44/hr while running, ~$0.017/hr while
-stopped. **Always stop it between sessions** — a several-hour idle "running"
-window is the single biggest avoidable cost in this stack.
-
-**⚠️ Run the gateway on the VM, not on the Mac.** `uvicorn main:app --reload`
-is a local-dev convenience for editing in isolation (syntax-checking a
-change, running `ingest.py`/`eval_customer_bot.py` against a scratch
-Chroma dir, etc.) — it is NOT how the live bot gets updated, and it does
-not point at production. Real customers hit the copy of `main.py` running
-as the `jarvis-gateway` systemd service on the DigitalOcean VM
-(`159.89.166.167`), fronted by nginx. To ship a change:
+**⚠️ Run the gateway on the droplet, not on your Mac.** Local `uvicorn
+--reload` only ever talks to your laptop's own `.env`/`chroma_db` — it
+will look like a change worked while production stays on the old code.
+To ship a real change:
 
 ```bash
-ssh root@159.89.166.167          # or your configured SSH alias for this VM
-cd /path/to/Jarvis_Core          # wherever this repo lives on the VM
-git pull
+ssh root@159.89.166.167
+cd /opt/jarvis-core          # or whichever tenant folder
+# make your change (see COMMANDS.md for the safe patch-script pattern)
 sudo systemctl restart jarvis-gateway
-sudo systemctl status jarvis-gateway   # confirm it came back up clean
-curl -s https://159.89.166.167.sslip.io/health   # confirm live health
+sudo systemctl status jarvis-gateway --no-pager   # confirm it came back up clean
 ```
 
-Running `uvicorn` on the Mac only ever talks to your local `chroma_db/`
-and whatever `.env` is on your laptop — it will look like it worked and
-still leave production on the old code. If you're not sure whether a
-step in this README or `COMMANDS.md` means "on the Mac" or "on the VM",
-assume anything that should reach real customers means the VM.
+## The Switchbox
+The `tenant_tools` table is the per-tenant feature toggle — enable/
+disable channels and integrations per tenant without touching code.
 
-## Two frontends, one gateway
+## Tenants (current, 2026-08-01)
 
-- **`founders-core/`** — the business-owner HUD. **This is the primary,
-  live UI.** Real voice in/out (mic → Deepgram STT → LLM tool-calling →
-  Deepgram TTS), typed chat, barge-in support, report overlays
-  (chart/gauge/table). See `WORKING.md` for the exact six-hop flow.
-- **`frontend/`** ("Jarvis Command Hub") — customer-facing HUD, work in
-  progress, parked for now. Has its own real voice wiring (`voiceClient.ts`)
-  but hit an unresolved Deepgram-timeout bug (audio not reliably reaching
-  the server) — not currently deployed.
+| Tenant | Type | Bot live? | Notes |
+|---|---|---|---|
+| Keshri Pipes | Catalog | Yes | Most-tested, has git+remote, payment follow-ups (new) |
+| Mihika's Studio | Booking | Yes | Git, no remote yet |
+| My Dance Academy | Booking | Yes | Git added 2026-08-01 |
+| Demo tenant | Catalog+Booking | No, deliberately | Fictional data-only tenant |
+| Sunita Plastics | Unknown | Not started | Blocked on real business info |
+| NXT Landspaces | Leads+Booking (real estate) | Not started | Fully spec'd, explicitly parked |
 
-Neither UI owns any logic. All routing, tool-calling, and data access
-happens on the gateway — the UIs are thin clients.
+## Payment follow-up reminders (new, 2026-08-01, Keshri Pipes only)
 
-## The Switchbox — how it actually works
-MCP gives every tool the same plug shape. The tier toggle is **not** MCP itself —
-it is the `tenant_tools` table. At session start, the client reads the enabled
-rows for that tenant and mounts only those MCP servers. The Founder Dashboard is
-CRUD on that table:
+Owner can trigger "send payment reminder to X"; customers replying to an
+open reminder get classified (delayed / ready-to-pay / other) and the
+system updates state and, for ready-to-pay replies, alerts the founder(s)
+directly. Full detail in `ARCHITECTURE.md`. Not yet ported to other
+tenants — it's catalog-tenant-specific, not needed by the booking
+templates.
 
-- Tenant upgrades to premium → flip `channel.whatsapp` to enabled, `channel.telegram` off.
-- Enable `crm.gohighlevel` for a pro tenant → one row update.
-- Agent code never changes. That is the whole trick.
+## Known open bugs (2026-08-01)
 
-## Model Routing
-**Updated 2026-07-13:** every task_type now has a free-cloud fallback
-chain behind local, so a single compute provider disappearing (the RunPod
-lesson) degrades service instead of killing it. The local Ollama entries
-remain stale until the new GPU session — the cloud links in each chain
-are what's real today.
-
-| task_type | chain (first certified-green wins) | why |
-|---|---|---|
-| intent | llama3.2:3b (local, stale) → gemini flash-lite-latest 🟢 → groq llama-8b | runs thousands of times, must be ~free |
-| agent_turn | qwen2.5:7b (local, stale) → gemini flash-latest 🔴* → groq llama-70b 🟢 → openrouter free → Claude Haiku | qwen proven at multi-tool calls; cloud chain covers GPU downtime |
-| draft | mistral:7b (local, stale) → gemini flash-latest → groq llama-70b → Claude Sonnet | prose quality |
-| escalation | Claude Sonnet (cloud, premium tier only) | hard reasoning |
-
-\* contested red — see Certification gate below.
-
-**The certification gate (new, 2026-07-13):** no (provider, model, task)
-triple serves live traffic until `certify_model.py` marks it **green** in
-`model_registry` (intent accuracy ≥90%, tool-call JSON format, safety
-refusal probes — any safety miss is an automatic red — and a latency
-ceiling per task). Red/uncertified = the router silently skips it, exactly
-like a disabled `tenant_tools` row. Yellow = last-resort fallback only.
-Every run is also archived in `eval_runs` so verdicts are auditable as
-providers drift.
-
-**Ordering rationale:** Gemini sits before Groq because its free tier
-survives volume (~1M tokens/min on Flash-class vs Groq's 6–12K/min);
-Groq is the speed fallback (336ms measured on the 70B). OpenRouter's
-free pool is the last-resort net (independent underlying quotas).
-
-**Gemini gotchas (hard-won 2026-07-13):** pinned dated model names like
-`gemini-2.5-flash` return 404 "no longer available to new users" on new
-`AQ.`-format keys — always use the rolling aliases `gemini-flash-latest`
-/ `gemini-flash-lite-latest`. Flash and Flash-Lite have **separate**
-free-tier quota pools, and the full Flash pool is tiny (~20 req/day
-observed), which matters for both certification runs and live fallback.
-
-## Eval Engine (Phase 0.5b, started 2026-07-12)
-A separate, out-of-band system for grading candidate models BEFORE they get
-promoted into `llm_router.py`'s `MODEL_MATRIX`. Not part of the production
-request path — a bug in the eval engine cannot take down the Telegram
-webhook or the founder voice pipeline.
-
-**Important correction, made 2026-07-13:** this track started under the
-wrong assumption that dslab was still production compute — it was retired
-as production on 2026-07-10, two days before eval work began, in favor of
-RunPod. **RunPod has since been formally abandoned** (see status note at
-top of this file) after repeated unrecoverable GPU-reclaim failures.
-dslab is once again the active compute — for local dev and eval work,
-NOT for live production, which has no network path to reach it. A new GPU
-provider is pending a separate future session.
-
-**Judges:** Gemini (`gemini-flash-latest` — pinned dated names like
-`gemini-2.5-flash` 404 on the newer `AQ.`-format Auth keys, must also use
-the `X-goog-api-key` header not `?key=`) and Groq
-(`llama-3.3-70b-versatile`) are both confirmed working. Anthropic is wired
-but the key is currently invalid (401). Together.ai and NVIDIA NIM are
-wired as candidate/judge options but unused — Together requires a $5
-minimum deposit with no confirmed free tier live; NIM's model name is an
-unverified guess, don't trust scores from it yet.
-
-**Flow:** `generate` (candidate) → `tier1_rules` (local, free) → conditional
-skip on hard-fail → `tier2_judge` (CRAFT: correctness, relevance, adherence,
-faithfulness, tone) → `aggregate` → `persist` (Supabase `llm_evaluations`).
-`catalog_from_run.py <run_id>` turns a completed run into a green/yellow/red
-`model_catalog` row — manual today, the seed of a future button-driven flow.
-
-**Results so far** (dslab, same model weights as RunPod's persistent volume
-— relative rankings should transfer even though the infra path differs):
-qwen2.5:7b-instruct 🟡 YELLOW (75-80%, cross-judged by both Gemini and
-Groq — they independently agree on two real regression weaknesses),
-llama3.2:3b-instruct 🔴 RED (55%), mistral:7b-instruct 🔴 RED (30%, Groq
-only, no cross-check yet). None of these have been run against a real
-production-matching pod yet since RunPod is abandoned — that gap gets
-closed once the new GPU session happens, not before.
-
-**Known gap:** `model_catalog` has a UNIQUE constraint on `(source,
-model_name)` — a second eval run on the same model silently overwrites the
-previous verdict. Qwen's dual-judge result currently only shows whichever
-run was marked last; there's no way to see "both judges agree" from the
-catalog table alone yet.
-
-**Second certification track (added 2026-07-13 evening):**
-`certify_model.py` + `model_registry`/`eval_runs` tables. This is the
-router-enforced gate: unlike `model_catalog` (advisory, manual promotion),
-`model_registry` is read by `llm_router.route()` at request time and
-mechanically blocks uncertified models from live traffic. Per-task
-verdicts (a model can be green for intent, red for agent_turn), full run
-history in `eval_runs`, safety-probe failure = automatic red.
-**Reconciliation needed:** two verdict stores now exist (`model_catalog`
-from the CRAFT eval flow, `model_registry` from certify_model.py) —
-long-term the CRAFT flow should feed `model_registry` as its persistence
-layer, or one should absorb the other. Decide before Phase 1 closes.
-
-**Certification results (2026-07-13):** gemini/flash-lite-latest 🟢 GREEN
-for intent (100% on the 8-case grid incl. Hinglish, all refusal probes
-passed, 1.3s); groq/llama-3.3-70b 🟢 GREEN for agent_turn (tool-call JSON
-verified, 336ms); gemini/flash-latest 🔴 RED for agent_turn — **verdict
-contested**: contaminated by 429s mid-run (Flash's ~20 req/day free pool
-exhausted), re-certify after quota reset. Exposed a real eval-engine bug:
-it cannot distinguish "model failed" from "provider throttled us" — both
-land red. Fix: treat 429 as INCONCLUSIVE with backoff retry, never
-convict on throttling.
-
-**Files:** `eval_cases.py` (20-case test grid, Kesari-only, tenant-aware
-refactor still pending), `eval_graph.py` (LangGraph), `eval_api.py`
-(FastAPI orchestrator), `scorecard.py`, `catalog_from_run.py`,
-`production_context.py`, `debug_judge.py` / `list_gemini_models.py`
-(diagnostic tools — keep these, they're what found both Gemini bugs),
-`eval_schema.sql`, `model_catalog_schema.sql`,
-`model_catalog_add_signal.sql`, `compare_runpod_vs_dslab.py`,
-`run_single_eval.py`.
-
-See `PROGRESS.md` 2026-07-12 and 2026-07-13 entries for the full decision
-log.
-
-## Known gaps (see PROGRESS.md for full session detail)
-
-- ~~**`get_catalog_report`'s similarity search unreliable**~~ **FIXED
-  2026-07-14** — root cause was two-fold: embeddings can't distinguish
-  product codes (KP005 ≈ KP001 to MiniLM), and the tool schema let the
-  model send an empty query. Fix: exact-match metadata lookup
-  (`where={"product_id": ...}`) before semantic search on BOTH paths
-  (Telegram `main.py` + founder `founder_ws.py`), plus a required,
-  strongly-described `query` parameter in the tool schema.
-- **RunPod abandoned 2026-07-13** — repeated unrecoverable GPU-reclaim
-  failures. Not being fixed; a new GPU provider is pending a separate
-  future session. Don't spend more time troubleshooting this account.
-- ~~**Production compute is currently broken**~~ **FIXED** — `main.py`
-  (07-13) and `founder_ws.py` (07-14) both route through
-  `llm_router.route()` / the Groq tool-calling chain now. No code path
-  references the dead RunPod URL anymore. Local Ollama entries in the
-  chains stay stale until the new GPU session.
-- **Founder's Core's revenue/runway/pipeline tools are still mock
-  fixtures** — there is genuinely no orders/deals/financial data to query
-  yet (no such tables exist). `get_usage_report` (2026-07-14) is the
-  template: real query → data summary → LLM phrases it, grounded, with
-  `eval_usage_grounding.py` checking no number is ever invented.
-  `get_briefing_report` is also real now (messages/users/moderation/stock).
-- **Gateway memory pressure** — 740MB peak of the 1GB cap with swap in
-  use after the embedding model loads (observed 2026-07-14). One more
-  resident model or a traffic spike risks an OOM kill. Options: bigger
-  droplet, or move embedding to a separate process/service.
-- **No order-taking flow** — the bot correctly refuses to fabricate order
-  confirmations (eval-enforced) and handles MOQ questions well, but there
-  is no actual order capture. Ships behind a HITL gate per the original
-  plan; demo framing: "coming next month."
-- **No auth on `/ws/founder/*` or `/tts/*`** — fine while the URL is
-  effectively private; needs a real gate before wider exposure.
-- **Founder voice/text has no toleration middleware** — by design, per
-  `founder_ws.py`'s own docstring (founder-only, not customer-facing).
-  Telegram already has the real toleration/reputation system live.
-- **The founder voice pipeline does not talk to the eval engine at all** —
-  no tool queries `model_catalog` or `llm_evaluations`. Asking the founder
-  HUD about eval results won't work until that tool is built (new work,
-  not a connection fix).
-- **`model_catalog`'s multi-judge overwrite gap** — see Eval Engine section
-  above.
-- **Two eval verdict stores** (`model_catalog` vs `model_registry`) — see
-  Eval Engine section; reconcile before Phase 1 closes.
-- **certify_model.py convicts on 429s** — throttling and genuine failure
-  both land red. Add 429-aware INCONCLUSIVE + backoff retry, then
-  re-certify gemini/flash-latest for agent_turn after its daily quota
-  resets (midnight Pacific).
-- **`schema.sql` is out of sync with live Supabase** — the `messages`
-  table exists in the live DB but is missing from the file on disk
-  (closes code_review.md item #1 once synced). Pull the actual live
-  column definitions rather than guessing.
-- **⚠️ Rotate `GEMINI_API_KEY`** — the full key appeared in pasted
-  terminal logs during the 2026-07-13 session. Delete in AI Studio,
-  create fresh, update `.env`. Do this before the next session ends.
-- **OpenRouter unverified** — key authenticates (429 not 401 on first
-  try) but the free pool was saturated; smoke-test again before counting
-  it as a real link in the chain.
-- **Chat-channel adapters still hand-rolled in Python** — Telegram's
-  webhook is custom FastAPI code with its own payload parsing. Plan is to
-  move this to n8n (see Phase Plan below) so adding WhatsApp/Slack/etc.
-  is node configuration, not new Python files.
-- **Products data lives only in Chroma text blobs** — prices/stock are
-  baked into embedded documents; a price change means re-running ingest,
-  and size/attribute queries ("1/4 inch pipe") have no structured lookup.
-  Planned fix: a `products` table in Supabase as source of truth, with
-  Chroma regenerated from it as a derived semantic index (two-path
-  retrieval: SQL for exact entities, vectors for broad questions).
+- **Dateless booking loop on "11 am"** (My Dance Academy) — still not
+  diagnosed across three sessions. See `ARCHITECTURE.md` for detail.
+- Everything else marked resolved in the last few sessions — see
+  `ARCHITECTURE.md`'s "Known gaps" section for the current, honest list
+  rather than trusting this file's older dated entries below, which are
+  historical and may no longer reflect reality.
 
 ## Files
-- `schema.sql` — the multi-tenant foundation (run against Postgres/Supabase)
-- `toleration.py` — strike system with reputation-based limits (Telegram path only)
-- `llm_router.py` — model matrix + free-cloud fallback chains + the
-  certification gate (refuses non-green models; also the eval engine's
-  provider layer)
-- `providers.py` — uniform `call(prompt, timeout) -> (text, usage)`
-  wrappers per provider (ollama, gemini, groq, openrouter, anthropic)
-- `certify_model.py` — the certification gate's eval runner
-  (green/yellow/red per model per task; safety miss = automatic red)
-- `db_client.py` — shared Supabase client factory + tenant resolution
-  (`resolve_tenant(slug)` — the single seam every channel now uses to
-  turn a tenant_slug into a real tenant_id, tier, and chroma_collection)
-- `schema_addition.sql` — `model_registry` + `eval_runs` DDL (already run
-  against live Supabase 2026-07-13)
-- `founder_ws.py` — founder tool registry + LLM tool-calling brain (voice AND typed chat)
-- `founder_reports.py` — REST-path founder reports (real Supabase queries:
-  usage, cost, switchbox, customers)
-- `eval_customer_bot.py` — end-to-end customer bot eval: calls the REAL
-  `ask_llm()` pipeline, ground truth parsed live from Chroma, both 07-14
-  production bugs locked in as regression cases. Run after every deploy:
-  `./venv/bin/python3 eval_customer_bot.py` on the VM.
-- `eval_usage_grounding.py` — numeric-hallucination eval for the founder
-  path's grounded `get_usage_report` (any number not in the real query
-  result = fail)
-- `voice_bridge.py` — mic audio ↔ Deepgram STT bridge
-- `tts.py` — Deepgram TTS proxy
-- `founders-core/` — primary live frontend
-- `frontend/` — parked customer-facing frontend (Jarvis Command Hub)
-- `WORKING.md` — the voice pipeline's exact architecture reference
-- Eval engine files — see Eval Engine section above
+- `schema.sql` — multi-tenant foundation. **[unverified]** — has
+  historically drifted behind the live Supabase schema (e.g. `messages`
+  table existed live before it was ever added to this file); confirm
+  against real Supabase columns before trusting it fully.
+- `main.py` — the gateway, per tenant folder
+- `owner_tools.py` — owner-only tools (vendor forwarding, payment
+  reminders as of 2026-08-01)
+- `payment_tools.py` — new 2026-08-01, Keshri Pipes only
+- `booking_tools.py` — availability engine + booking creation (booking-
+  template tenants)
+- `catalog_store.py` — structured product truth (Supabase `products`
+  table), Chroma as a derived semantic index
+- `llm_router.py` / `providers.py` — model routing + fallback chains
+- `toleration.py` — strike system, Telegram path
+- `ARCHITECTURE.md` — the current map, rewritten each session
+- `PROGRESS.md` — the full dated diary
+- `COMMANDS.md` — command reference, updated 2026-08-01 for the current
+  droplet-based workflow (the ngrok/local-dev section below is historical)
 
-## Phase Plan
-- **Phase 0 (done):** local dev seed — one tenant, Telegram, local Chroma, toleration middleware.
-- **Phase 0.5 (done):** real deployment — VM, RunPod GPU, live HTTPS, real voice pipeline for Founder's Core.
-- **Phase 0.5b (in progress, started 2026-07-12):** eval engine — grade candidate models before MODEL_MATRIX promotion. See Eval Engine section.
-- **Phase 1 (next, reordered 2026-07-13):** ~~build a `MODEL_MATRIX` with
-  free-cloud fallback~~ **✅ done 07-13 evening** (gemini + groq certified
-  green, certification gate live in the router). **Remaining, in order:**
-  wire `main.py` and `founder_ws.py` through `llm_router.route()` for
-  real — this is the actual production fix and the bot stays down until
-  it lands; fix certify_model.py's 429-conviction bug + re-certify gemini
-  flash for agent_turn; rotate the exposed Gemini key; reconcile
-  `model_catalog` vs `model_registry`; provision + verify a new GPU
-  provider (separate session, not blocking the above); fix the catalog
-  tool-calling bug; point remaining founder tools at real data; add auth
-  to the voice/founder routes; wire a model_catalog tool into the founder
-  voice pipeline; migrate chat-channel adapters (Telegram now,
-  WhatsApp/Slack/other later) from custom Python webhook code to n8n —
-  Python keeps a single internal `POST /api/v1/chat`
-  (tenant_id, channel, channel_user_id, display_name, text -> reply_text),
-  n8n holds each channel's platform credentials itself and handles
-  inbound payload parsing + outbound send via its built-in nodes, so a
-  live secret never has to round-trip through Python on every message.
-  Does NOT apply to `founder_ws.py`/`voice_bridge.py` — those stay custom
-  Python; they're persistent WebSocket connections (full-duplex audio,
-  barge-in) that n8n's request/response model can't hold open.
-  `tenant_tools` stays the on/off switch per tenant/channel either way.
-- **Phase 2:** Second tenant onboarded purely via config to prove isolation.
-- **Phase 3:** B2C Life OS module — deferred deliberately, per original plan.
+---
 
-**Status update, 2026-07-13 (late night):** the wiring landed. `main.py`'s
-Telegram path now calls `llm_router.route()` for real instead of hitting
-Ollama/RunPod directly. `agent_turn` is temporarily restricted to
-Groq/Gemini only (certified: groq/llama-3.3-70b-versatile green) until a
-rented GPU cluster replaces RunPod. **Bot confirmed live and replying in
-Telegram again.** `basic` tier temporarily allowed cloud (TIER_ALLOWS_CLOUD)
-since local is down — revert once local inference is back and paid-cloud
-tenants need the real gate.
+## Historical narrative (RunPod era, eval engine build — for context only)
 
-**Status update, 2026-07-14:** the second half of the wiring landed too —
-`founder_ws.py`'s tool-calling now walks a real fallback chain
-(`TOOL_CALL_CHAIN`, currently Groq's llama-3.3-70b via the new
-`providers.get_raw_chat_call` interface) and its text synthesis goes
-through `llm_router.route()`. Tenant resolution is enforced end-to-end
-(unknown slugs get a clean WS close, not tenant #1's data — which
-surfaced and forced the fix of the kesari/keshri slug spelling mismatch
-in the frontend, rebuilt + redeployed). Retrieval hardened (exact-match
-codes, full-catalog intent), embedding model pre-warmed at startup, and
-`eval_customer_bot.py` green at 8/8 against production.
+The sections below describe the 2026-07 sessions that got this platform
+from local dev to a real deployment, including the eval/certification
+engine and a full compute-provider outage (RunPod terminated mid-project,
+recovered onto a free-cloud fallback chain). This is kept for context on
+*why* certain design decisions exist (e.g. the fallback chain + green/
+yellow/red certification gate in `llm_router.py`), but the specific
+status claims in this section are **not current** — treat `PROGRESS.md`
+and `ARCHITECTURE.md` as the source of truth for what's true today.
+
+**2026-07-13**: RunPod (the original GPU compute provider) was
+terminated mid-project, taking production down. Root cause identified:
+zero resilience from depending on a single compute provider. Fix: wire
+`main.py` and `founder_ws.py` through `llm_router.route()` with a real
+free-cloud fallback chain (Groq → Gemini → OpenRouter), gated by a
+certification system (`certify_model.py` / `model_registry`) that
+refuses to route to any unverified model. Landed same day; bot confirmed
+live again.
+
+**2026-07-14**: Both LLM paths fully off RunPod. Structured catalog
+truth (`products` table in Supabase, Chroma as derived index) built to
+fix product-code retrieval bugs found via real customer screenshots.
+`eval_customer_bot.py` (end-to-end regression suite against the real
+pipeline) green at 8/8.
+
+**Eval engine** (`eval_cases.py`, `eval_graph.py`, `certify_model.py`,
+and related files): a separate, out-of-band system for grading candidate
+models before promotion into the live routing table. Two verdict stores
+existed at last check (`model_catalog` from an earlier CRAFT-based flow,
+`model_registry` from the certification gate) with a flagged but
+unresolved reconciliation need — **[unverified]**, confirm current state
+before relying on either.
+
+For the full session-by-session account of this period, see
+`PROGRESS.md`'s 2026-07-10 through 2026-07-14 entries.
